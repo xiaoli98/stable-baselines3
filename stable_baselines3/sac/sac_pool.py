@@ -94,13 +94,13 @@ class SACPool(OffPolicyAlgorithm):
             self._setup_model()
             
     def _create_aliases(self) -> None:
-        self.actor = self.policy.actor_pool
-        self.critic = self.policy.critic_pool
-        self.critic_target = self.policy.critic_target_pool
+        self.actor = self.policy.actor
+        self.critic = self.policy.critic
+        self.critic_target = self.policy.critic_target
     
     def _setup_model(self) -> None:
         super()._setup_model()
-        # self._create_aliases()
+        self._create_aliases()
         # Running mean and running var
         self.batch_norm_stats = get_parameters_by_name(self.critic, ["running_"])
         self.batch_norm_stats_target = get_parameters_by_name(self.critic_target, ["running_"])
@@ -125,7 +125,7 @@ class SACPool(OffPolicyAlgorithm):
 
             # Note: we optimize the log of the entropy coeff which is slightly different from the paper
             # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
-            self.log_ent_coef = th.log(th.ones(self.policy.pool_size, device=self.device) * init_value).requires_grad_(True)
+            self.log_ent_coef = th.log(th.ones(1, device=self.device) * init_value).requires_grad_(True)
             self.ent_coef_optimizer = th.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
         else:
             # Force conversion to float
@@ -146,7 +146,7 @@ class SACPool(OffPolicyAlgorithm):
         self._update_learning_rate(optimizers)
 
         ent_coef_losses, ent_coefs = [], []
-        actor_losses, critic_losses = [], []
+        actor_losses, critic_losses = [], [[]]*self.pool_size
 
         for gradient_step in range(gradient_steps):
             # for idx in range(self.pool_size):
@@ -185,25 +185,28 @@ class SACPool(OffPolicyAlgorithm):
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
                 # Compute the next Q values: min over all critics targets
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                next_q_values = th.stack(self.critic_target(replay_data.next_observations, next_actions), dim=-1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
                 # add entropy term
-                next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
+                next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)[:,None]
                 # td error + entropy term
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+                target_q_values = replay_data.rewards[:,None] + (1 - replay_data.dones)[:, None] * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
             current_q_values = self.critic(replay_data.observations, replay_data.actions)
-
+            # print(f"current_q_values shape: {len(current_q_values)}, {current_q_values[0].shape}")
+            # print(f"target_q_values shape: {target_q_values.shape}")
             # Compute critic loss
-            critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
-            assert isinstance(critic_loss, th.Tensor)  # for type checker
-            critic_losses.append(critic_loss.item())  # type: ignore[union-attr]
-
-            # Optimize the critic
             self.critic.optimizer.zero_grad()
-            critic_loss.backward()
+            for idx, pool_current_q in enumerate(current_q_values):
+                critic_loss = 0.5 * sum(F.mse_loss(pool_current_q[:,i].reshape(-1,1), target_q_values[:,:,idx]) for i in range(pool_current_q.shape[1]))
+                assert isinstance(critic_loss, th.Tensor)  # for type checker
+                critic_losses[idx].append(critic_loss.item())  # type: ignore[union-attr]
+                critic_loss.backward()
+            # Optimize the critic
+            # self.critic.optimizer.zero_grad()
+            # critic_loss.backward()
             self.critic.optimizer.step()
 
             # Compute actor loss
@@ -234,15 +237,15 @@ class SACPool(OffPolicyAlgorithm):
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
     
-     def learn(
-        self: SelfSAC,
+    def learn(
+        self: SelfSACPool,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
         tb_log_name: str = "SAC",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfSAC:
+    ) -> SelfSACPool:
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,

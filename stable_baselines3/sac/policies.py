@@ -204,6 +204,8 @@ class ActorPool(BasePolicy):
             squash_output=True,
         )
         self.pool_size = pool_size
+        self.actor_pool = ModuleList()
+        self.action_dim = get_action_dim(self.action_space)
         for i in range(pool_size):
             self.actor_pool.append(Actor(
                 observation_space,
@@ -218,7 +220,6 @@ class ActorPool(BasePolicy):
                 use_expln,
                 clip_mean,
             ))
-        # self.actor_pool.to(self.device)
     
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
@@ -257,40 +258,29 @@ class ActorPool(BasePolicy):
             msg = f"actor[{idx}]: reset_noise() is only available when using gSDE"
             assert isinstance(actor.action_dist, StateDependentNoiseDistribution), msg
             actor.action_dist.sample_weights(actor.log_std, batch_size=batch_size)
-
-    def get_action_dist_params(self, obs: PyTorchObs, actor) -> Tuple[th.Tensor, th.Tensor, Dict[str, th.Tensor]]:
-        """
-        Get the parameters for the action distribution.
-
-        :param obs:
-        :return:
-            Mean, standard deviation and optional keyword arguments.
-        """
-        features = actor.extract_features(obs, actor.features_extractor)
-        latent_pi = actor.latent_pi(features)
-        mean_actions = actor.mu(latent_pi)
-
-        if actor.use_sde:
-            return mean_actions, actor.log_std, dict(latent_sde=latent_pi)
-        # Unstructured exploration (Original implementation)
-        log_std = actor.log_std(latent_pi)  # type: ignore[operator]
-        # Original Implementation to cap the standard deviation
-        log_std = th.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-        return mean_actions, log_std, {}
     
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        actions = []
+        bs = obs.shape[0]
+        actions = th.zeros([bs, self.action_dim])
         for actor in self.actor_pool:
-            mean_actions, log_std, kwargs = self.get_action_dist_params(obs, actor)
-            actions.append(actor.action_dist.log_prob_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs))
-        return th.tensor(actions)
+            mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
+            act = actor.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
+            actions += act
+        return actions/self.pool_size
     
     def action_log_prob(self, obs: PyTorchObs) -> Tuple[th.Tensor, th.Tensor]:
-        log_probs = []
+        bs = obs.shape[0]
+        actions = th.zeros([bs, self.action_dim])
+        #FIXME the normal one has shape [64]
+        log_probs = th.zeros([bs])
         for actor in self.actor_pool:
-            mean_actions, log_std, kwargs = self.get_action_dist_params(obs, actor)
-            log_probs.append(actor.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs))
-        return th.tensor(log_probs)
+            mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
+            action, log_prob = actor.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
+            # print(f"log_prob shape: {log_prob.shape}")
+            actions += action
+            log_probs += log_prob
+        # print(f"log_probs shape: {log_probs.shape}")
+        return actions/self.pool_size, log_probs/self.pool_size
     
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         return self(observation, deterministic)
@@ -540,10 +530,6 @@ class SACPolicyPool(SACPolicy):
         )
         return data
     
-    def reset_noise(self, batch_size: int = 1) -> None:
-        for actor in self.actor_pool:
-            actor.reset_noise(batch_size=batch_size)
-    
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> Actor:
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         return ActorPool(**actor_kwargs).to(self.device)
@@ -557,14 +543,11 @@ class SACPolicyPool(SACPolicy):
 
     # TODO returns only the mean action, no pool action
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        actions = self.actor_pool._predict(observation, deterministic)
-        return th.sum(actions, dim=1)/self.actor_pool.pool_size
-    
-    def set_training_mode(self, mode: bool) -> None:
-        for actor, critic in zip(self.actor_pool, self.critic_pool):
-            actor.set_training_mode(mode)
-            critic.set_training_mode(mode)
-        self.training = mode
+        actions = self.actor._predict(observation, deterministic)
+        # print(f"actions: {actions}\t shape: {actions.shape}")
+        # out = th.sum(actions, dim=1)/self.actor.pool_size
+        # print(f"out: {out}\t shape:{out.shape}")
+        return actions
 
 
 class CnnPolicy(SACPolicy):

@@ -1035,7 +1035,8 @@ class ContinuousCriticPool(BaseModel):
             with th.set_grad_enabled(not critic.share_features_extractor):
                 features = critic.extract_features(obs, critic.features_extractor)
             qvalue_input = th.cat([features, actions], dim=1)
-            q_values.append(th.tensor([q_net(qvalue_input) for q_net in critic.q_networks]))
+            qvalue = [q_net(qvalue_input) for q_net in critic.q_networks]
+            q_values.append(th.cat(qvalue, dim=1))
         return tuple(q_values)
     
     # FIXME not need now, used only for TD3
