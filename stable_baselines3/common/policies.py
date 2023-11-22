@@ -11,6 +11,7 @@ import numpy as np
 import torch as th
 from gymnasium import spaces
 from torch import nn
+from torch.nn import ModuleList
 
 from stable_baselines3.common.distributions import (
     BernoulliDistribution,
@@ -974,6 +975,70 @@ class ContinuousCritic(BaseModel):
         qvalue_input = th.cat([features, actions], dim=1)
         return tuple(q_net(qvalue_input) for q_net in self.q_networks)
 
+    def q1_forward(self, obs: th.Tensor, actions: th.Tensor) -> th.Tensor:
+        """
+        Only predict the Q-value using the first network.
+        This allows to reduce computation when all the estimates are not needed
+        (e.g. when updating the policy in TD3).
+        """
+        with th.no_grad():
+            features = self.extract_features(obs, self.features_extractor)
+        return self.q_networks[0](th.cat([features, actions], dim=1))
+
+class ContinuousCriticPool(BaseModel):
+    critic_pool:ModuleList
+    
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Box,
+        net_arch: List[int],
+        features_extractor: BaseFeaturesExtractor,
+        features_dim: int,
+        activation_fn: Type[nn.Module] = nn.ReLU,
+        normalize_images: bool = True,
+        n_critics: int = 2,
+        share_features_extractor: bool = True,
+        pool_size: int = 6
+    ):
+        super().__init__(
+            observation_space,
+            action_space,
+            features_extractor=features_extractor,
+            normalize_images=normalize_images,
+        )
+        
+        action_dim = get_action_dim(self.action_space)
+        self.share_features_extractor = share_features_extractor
+        self.n_critics_per_pool = n_critics
+        self.pool_size = pool_size
+        
+        self.critic_pool = ModuleList()
+        for _ in range(pool_size):
+            self.critic_pool.append(ContinuousCritic(
+                observation_space,
+                action_space,
+                net_arch,
+                features_extractor,
+                features_dim,
+                activation_fn,
+                normalize_images,
+                n_critics,
+                share_features_extractor
+            ))
+            
+    def forward(self, obs: th.Tensor, actions: th.Tensor) -> Tuple[th.Tensor, ...]:
+        # Learn the features extractor using the policy loss only
+        # when the features_extractor is shared with the actor
+        q_values = []
+        for critic in self.critic_pool:
+            with th.set_grad_enabled(not critic.share_features_extractor):
+                features = critic.extract_features(obs, critic.features_extractor)
+            qvalue_input = th.cat([features, actions], dim=1)
+            q_values.append(th.tensor([q_net(qvalue_input) for q_net in critic.q_networks]))
+        return tuple(q_values)
+    
+    # FIXME not need now, used only for TD3
     def q1_forward(self, obs: th.Tensor, actions: th.Tensor) -> th.Tensor:
         """
         Only predict the Q-value using the first network.
