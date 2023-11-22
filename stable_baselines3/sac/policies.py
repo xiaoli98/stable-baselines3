@@ -261,7 +261,7 @@ class ActorPool(BasePolicy):
     
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         bs = obs.shape[0]
-        actions = th.zeros([bs, self.action_dim])
+        actions = th.zeros([bs, self.action_dim], device=self.device)
         for actor in self.actor_pool:
             mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
             act = actor.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
@@ -270,9 +270,8 @@ class ActorPool(BasePolicy):
     
     def action_log_prob(self, obs: PyTorchObs) -> Tuple[th.Tensor, th.Tensor]:
         bs = obs.shape[0]
-        actions = th.zeros([bs, self.action_dim])
-        #FIXME the normal one has shape [64]
-        log_probs = th.zeros([bs])
+        actions = th.zeros([bs, self.action_dim], device=self.device)
+        log_probs = th.zeros([bs], device=self.device)
         for actor in self.actor_pool:
             mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
             action, log_prob = actor.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
