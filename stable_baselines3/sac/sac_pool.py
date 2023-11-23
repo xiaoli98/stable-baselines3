@@ -146,7 +146,7 @@ class SACPool(OffPolicyAlgorithm):
         self._update_learning_rate(optimizers)
 
         ent_coef_losses, ent_coefs = [], []
-        actor_losses, critic_losses = [], [[]]*self.pool_size
+        actor_losses, critic_losses = [[]]*self.pool_size, [[]]*self.pool_size
 
         for gradient_step in range(gradient_steps):
             # for idx in range(self.pool_size):
@@ -212,14 +212,19 @@ class SACPool(OffPolicyAlgorithm):
             # Compute actor loss
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Min over all critic networks
-            q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
-            min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
-            actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
-            actor_losses.append(actor_loss.item())
+            critic_out = self.critic(replay_data.observations, actions_pi)
+            q_values_pi = th.stack(critic_out, dim=1)
+            min_qf_pi, _ = th.min(q_values_pi, dim=2, keepdim=True)
+            self.actor.optimizer.zero_grad()
+            for i in range(self.pool_size):
+                actor_loss = (ent_coef * log_prob - min_qf_pi[:,i   ]).mean()
+                actor_losses[idx].append(actor_loss.item())
+                actor_loss.backward(retain_graph=True)
+            # actor_losses.append(actor_loss.item())
 
             # Optimize the actor
-            self.actor.optimizer.zero_grad()
-            actor_loss.backward()
+            # self.actor.optimizer.zero_grad()
+            # actor_loss.backward()
             self.actor.optimizer.step()
 
             # Update target networks
@@ -232,8 +237,10 @@ class SACPool(OffPolicyAlgorithm):
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
-        self.logger.record("train/actor_loss", np.mean(actor_losses))
-        self.logger.record("train/critic_loss", np.mean(critic_losses))
+        for idx, each_actor_losses in enumerate(actor_losses):
+            self.logger.record(f"train/actor_loss_{idx}", np.mean(each_actor_losses))
+        for idx, each_critic_losses in enumerate(critic_losses):    
+            self.logger.record(f"train/critic_loss_{idx}", np.mean(each_critic_losses))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
     
