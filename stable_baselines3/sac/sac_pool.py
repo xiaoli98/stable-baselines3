@@ -125,7 +125,7 @@ class SACPool(OffPolicyAlgorithm):
 
             # Note: we optimize the log of the entropy coeff which is slightly different from the paper
             # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
-            self.log_ent_coef = th.log(th.ones(1, device=self.device) * init_value).requires_grad_(True)
+            self.log_ent_coef = th.log(th.ones([self.pool_size,1], device=self.device) * init_value).requires_grad_(True)
             self.ent_coef_optimizer = th.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
         else:
             # Force conversion to float
@@ -145,7 +145,7 @@ class SACPool(OffPolicyAlgorithm):
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
 
-        ent_coef_losses, ent_coefs = [], []
+        ent_coef_losses, ent_coefs = [[]]*self.pool_size, [[]]*self.pool_size
         actor_losses, critic_losses = [[]]*self.pool_size, [[]]*self.pool_size
 
         for gradient_step in range(gradient_steps):
@@ -159,28 +159,28 @@ class SACPool(OffPolicyAlgorithm):
 
             # Action by the current actor for the sampled state
             actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
-            log_prob = log_prob.reshape(-1, 1)
-
+            # log_prob = log_prob.reshape(-1, 1)
+            # print(f"log_prob shape: {log_prob.shape}")
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
                 # Important: detach the variable from the graph
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
                 ent_coef = th.exp(self.log_ent_coef.detach())
-                ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean()
-                ent_coef_losses.append(ent_coef_loss.item())
+                ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean(dim=1)
+                for idx, loss in enumerate(ent_coef_losses):
+                    loss.append(ent_coef_loss[idx].item())
+                    ent_coefs[idx].append(ent_coef[idx].item())
             else:
                 ent_coef = self.ent_coef_tensor
-
-            ent_coefs.append(ent_coef.item())
-
+                ent_coefs.append(ent_coef.item())
             # Optimize entropy coefficient, also called
             # entropy temperature or alpha in the paper
             if ent_coef_loss is not None and self.ent_coef_optimizer is not None:
                 self.ent_coef_optimizer.zero_grad()
-                ent_coef_loss.backward()
+                for i in range(self.pool_size):
+                    ent_coef_loss[i].backward(retain_graph=True)
                 self.ent_coef_optimizer.step()
-
             with th.no_grad():
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
@@ -192,7 +192,7 @@ class SACPool(OffPolicyAlgorithm):
                 if self.actor.mean_out:
                     next_q_values = next_q_values - ent_coef * next_log_prob[:, None]
                 else:
-                    next_q_values = next_q_values - ent_coef * next_log_prob.transpose(0,1)
+                    next_q_values = next_q_values - (ent_coef * next_log_prob).transpose(0,1)
                 # td error + entropy term
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
@@ -221,7 +221,7 @@ class SACPool(OffPolicyAlgorithm):
             min_qf_pi, _ = th.min(q_values_pi, dim=2, keepdim=True)
             self.actor.optimizer.zero_grad()
             for i in range(self.pool_size):
-                actor_loss = (ent_coef * log_prob - min_qf_pi[:,i   ]).mean()
+                actor_loss = (ent_coef * log_prob[i] - min_qf_pi[:,i   ]).mean()
                 actor_losses[idx].append(actor_loss.item())
                 actor_loss.backward(retain_graph=True)
             # actor_losses.append(actor_loss.item())
