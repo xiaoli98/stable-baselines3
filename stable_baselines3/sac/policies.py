@@ -195,6 +195,7 @@ class ActorPool(BasePolicy):
         clip_mean: float = 2.0,
         normalize_images: bool = True,
         pool_size: int = 6,
+        mean_out: bool = False, #if output is the mean of each subpolicy's outpout
     ):
         super().__init__(
             observation_space,
@@ -204,6 +205,7 @@ class ActorPool(BasePolicy):
             squash_output=True,
         )
         self.pool_size = pool_size
+        self.mean_out = mean_out
         self.actor_pool = ModuleList()
         self.action_dim = get_action_dim(self.action_space)
         for i in range(pool_size):
@@ -260,27 +262,44 @@ class ActorPool(BasePolicy):
             actor.action_dist.sample_weights(actor.log_std, batch_size=batch_size)
     
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        bs = obs.shape[0]
-        actions = th.zeros([bs, self.action_dim], device=self.device)
-        for actor in self.actor_pool:
-            mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
-            act = actor.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
-            actions += act
-        return actions/self.pool_size
-    
+        if self.mean_out:
+            bs = obs.shape[0]
+            actions = th.zeros([bs, self.action_dim], device=self.device)
+            for actor in self.actor_pool:
+                # mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
+                # act = actor.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
+                actions += actor(obs, deterministic)
+            return actions/self.pool_size
+        else:
+            #random actor is selected to perform the rollout
+            i = th.randint(0, self.pool_size, [1])
+            # mean_action, log_std, kwargs = self.actor_pool[i].get_action_dist_params(obs)
+            # return self.actor_pool[i].actions_from_params(mean_action, log_std, deterministic=deterministic, **kwargs)
+            return self.actor_pool[i](obs, deterministic)
+        
     def action_log_prob(self, obs: PyTorchObs) -> Tuple[th.Tensor, th.Tensor]:
-        bs = obs.shape[0]
-        actions = th.zeros([bs, self.action_dim], device=self.device)
-        log_probs = th.zeros([bs], device=self.device)
-        for actor in self.actor_pool:
-            mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
-            action, log_prob = actor.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
-            # print(f"log_prob shape: {log_prob.shape}")
-            actions += action
-            log_probs += log_prob
-        # print(f"log_probs shape: {log_probs.shape}")
-        return actions/self.pool_size, log_probs/self.pool_size
-    
+        if self.mean_out:
+            bs = obs.shape[0]
+            actions = th.zeros([bs, self.action_dim], device=self.device)
+            log_probs = th.zeros([bs], device=self.device)
+            for actor in self.actor_pool:
+                action, log_prob = actor.action_log_prob(obs)
+                # mean_actions, log_std, kwargs = actor.get_action_dist_params(obs)
+                # action, log_prob = actor.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
+                # print(f"log_prob shape: {log_prob.shape}")
+                actions += action
+                log_probs += log_prob
+            return actions/self.pool_size, log_probs/self.pool_size
+        else:
+            bs = obs.shape[0]
+            actions = th.zeros([self.pool_size, bs, self.action_dim], device=self.device)
+            log_probs = th.zeros([self.pool_size, bs], device=self.device)
+            for idx, actor in enumerate(self.actor_pool):
+                action, log_prob = actor.action_log_prob(obs)
+                actions[idx] = action
+                log_probs[idx] = log_prob
+            return tuple([actions, log_probs])
+                
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         return self(observation, deterministic)
         
@@ -498,6 +517,7 @@ class SACPolicyPool(SACPolicy):
         n_critics: int = 2,
         share_features_extractor: bool = False,
         pool_size: int = 6,
+        mean_out: bool = False,
     ):
         super().__init__(
             observation_space,
@@ -519,6 +539,7 @@ class SACPolicyPool(SACPolicy):
         )
         self.action_dim = get_action_dim(self.action_space)
         self.pool_size = pool_size
+        self.actor_kwargs.update({"mean_out": mean_out})
         self._build(lr_schedule)
                 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
@@ -542,11 +563,8 @@ class SACPolicyPool(SACPolicy):
 
     # TODO returns only the mean action, no pool action
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        actions = self.actor._predict(observation, deterministic)
-        # print(f"actions: {actions}\t shape: {actions.shape}")
-        # out = th.sum(actions, dim=1)/self.actor.pool_size
-        # print(f"out: {out}\t shape:{out.shape}")
-        return actions
+        return self.actor._predict(observation, deterministic)
+         
 
 
 class CnnPolicy(SACPolicy):

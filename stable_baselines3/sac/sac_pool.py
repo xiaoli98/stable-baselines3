@@ -185,12 +185,16 @@ class SACPool(OffPolicyAlgorithm):
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
                 # Compute the next Q values: min over all critics targets
-                next_q_values = th.stack(self.critic_target(replay_data.next_observations, next_actions), dim=-1)
+                next_q_values = th.stack(self.critic_target(replay_data.next_observations, next_actions, pool_action=not self.actor.mean_out), dim=-1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                next_q_values = next_q_values.squeeze()
                 # add entropy term
-                next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)[:,None]
+                if self.actor.mean_out:
+                    next_q_values = next_q_values - ent_coef * next_log_prob[:, None]
+                else:
+                    next_q_values = next_q_values - ent_coef * next_log_prob.transpose(0,1)
                 # td error + entropy term
-                target_q_values = replay_data.rewards[:,None] + (1 - replay_data.dones)[:, None] * self.gamma * next_q_values
+                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
@@ -200,7 +204,7 @@ class SACPool(OffPolicyAlgorithm):
             # Compute critic loss
             self.critic.optimizer.zero_grad()
             for idx, pool_current_q in enumerate(current_q_values):
-                critic_loss = 0.5 * sum(F.mse_loss(pool_current_q[:,i].reshape(-1,1), target_q_values[:,:,idx]) for i in range(pool_current_q.shape[1]))
+                critic_loss = 0.5 * sum(F.mse_loss(pool_current_q[:,i].reshape(-1,1), target_q_values[:,idx].reshape(-1,1)) for i in range(pool_current_q.shape[1]))
                 assert isinstance(critic_loss, th.Tensor)  # for type checker
                 critic_losses[idx].append(critic_loss.item())  # type: ignore[union-attr]
                 critic_loss.backward()
@@ -212,7 +216,7 @@ class SACPool(OffPolicyAlgorithm):
             # Compute actor loss
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Min over all critic networks
-            critic_out = self.critic(replay_data.observations, actions_pi)
+            critic_out = self.critic(replay_data.observations, actions_pi, pool_action= not self.actor.mean_out)
             q_values_pi = th.stack(critic_out, dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=2, keepdim=True)
             self.actor.optimizer.zero_grad()

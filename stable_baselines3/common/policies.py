@@ -999,7 +999,7 @@ class ContinuousCriticPool(BaseModel):
         normalize_images: bool = True,
         n_critics: int = 2,
         share_features_extractor: bool = True,
-        pool_size: int = 6
+        pool_size: int = 6,
     ):
         super().__init__(
             observation_space,
@@ -1008,7 +1008,6 @@ class ContinuousCriticPool(BaseModel):
             normalize_images=normalize_images,
         )
         
-        action_dim = get_action_dim(self.action_space)
         self.share_features_extractor = share_features_extractor
         self.n_critics_per_pool = n_critics
         self.pool_size = pool_size
@@ -1027,19 +1026,23 @@ class ContinuousCriticPool(BaseModel):
                 share_features_extractor
             ))
             
-    def forward(self, obs: th.Tensor, actions: th.Tensor) -> Tuple[th.Tensor, ...]:
+    def forward(self, obs: th.Tensor, actions: th.Tensor, pool_action: bool = False) -> Tuple[th.Tensor, ...]:
         # Learn the features extractor using the policy loss only
         # when the features_extractor is shared with the actor
-        q_values = []
-        for critic in self.critic_pool:
-            with th.set_grad_enabled(not critic.share_features_extractor):
-                features = critic.extract_features(obs, critic.features_extractor)
-            qvalue_input = th.cat([features, actions], dim=1)
-            qvalue = [q_net(qvalue_input) for q_net in critic.q_networks]
-            q_values.append(th.cat(qvalue, dim=1))
-        return tuple(q_values)
+        # q_values = []
+        # for critic in self.critic_pool:
+        #     with th.set_grad_enabled(not critic.share_features_extractor):
+        #         features = critic.extract_features(obs, critic.features_extractor)
+        #     qvalue_input = th.cat([features, actions], dim=1)
+        #     qvalue = [q_net(qvalue_input) for q_net in critic.q_networks]
+        #     q_values.append(th.cat(qvalue, dim=1))
+        # return tuple(q_values)
+        if not pool_action:
+            return tuple([th.stack(critic(obs, actions), dim=1) for critic in self.critic_pool])
+        else:
+            return tuple([th.stack(critic(obs, actions[idx]), dim=1) for idx, critic in enumerate(self.critic_pool)])
     
-    # FIXME not need now, used only for TD3
+    # TODO not need now, used only for TD3
     def q1_forward(self, obs: th.Tensor, actions: th.Tensor) -> th.Tensor:
         """
         Only predict the Q-value using the first network.
