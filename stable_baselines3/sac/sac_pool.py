@@ -125,7 +125,7 @@ class SACPool(OffPolicyAlgorithm):
 
             # Note: we optimize the log of the entropy coeff which is slightly different from the paper
             # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
-            self.log_ent_coef = th.log(th.ones([self.pool_size,1], device=self.device) * init_value).requires_grad_(True)
+            self.log_ent_coef = th.log(th.ones(1, device=self.device) * init_value).requires_grad_(True)
             self.ent_coef_optimizer = th.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
         else:
             # Force conversion to float
@@ -145,7 +145,7 @@ class SACPool(OffPolicyAlgorithm):
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
 
-        ent_coef_losses, ent_coefs = [[]]*self.pool_size, [[]]*self.pool_size
+        ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [[]]*self.pool_size, [[]]*self.pool_size
 
         for gradient_step in range(gradient_steps):
@@ -167,20 +167,19 @@ class SACPool(OffPolicyAlgorithm):
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
                 ent_coef = th.exp(self.log_ent_coef.detach())
-                ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean(dim=1)
-                for idx, loss in enumerate(ent_coef_losses):
-                    loss.append(ent_coef_loss[idx].item())
-                    ent_coefs[idx].append(ent_coef[idx].item())
+                ent_coef_loss = -(self.log_ent_coef * (log_prob.reshape(-1,1) + self.target_entropy).detach()).mean()
+                ent_coef_losses.append(ent_coef_loss.item())
             else:
                 ent_coef = self.ent_coef_tensor
-                ent_coefs.append(ent_coef.item())
+            
+            ent_coefs.append(ent_coef.item())
             # Optimize entropy coefficient, also called
             # entropy temperature or alpha in the paper
             if ent_coef_loss is not None and self.ent_coef_optimizer is not None:
                 self.ent_coef_optimizer.zero_grad()
-                for i in range(self.pool_size):
-                    ent_coef_loss[i].backward(retain_graph=True)
+                ent_coef_loss.backward()
                 self.ent_coef_optimizer.step()
+                
             with th.no_grad():
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
