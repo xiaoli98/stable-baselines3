@@ -11,20 +11,20 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from stable_baselines3.sac.policies import Actor, SACPolicyPool, CnnPolicy, MlpPolicy, MultiInputPolicy, SACPolicy
+from stable_baselines3.sac.policies_pool import CnnPolicy, MlpPolicy, SACPolicyPool
+from stable_baselines3.sac.policies import SACPolicy
 
 SelfSACPool = TypeVar("SelfSACPool", bound="SACPool")
 
 class SACPool(OffPolicyAlgorithm):
     policy_aliases: ClassVar[Dict[str, Type[BasePolicy]]] = {
-        "PolicyPool": SACPolicyPool,
-        # "MlpPolicy": MlpPolicy,
-        # "CnnPolicy": CnnPolicy,
+        "MlpPolicy": MlpPolicy,
+        "CnnPolicy": CnnPolicy,
         # "MultiInputPolicy": MultiInputPolicy,
     }
     def __init__(
         self,
-        policy: Union[str, Type[SACPolicy]],
+        policy: Union[str, Type[SACPolicyPool]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = 1_000_000,  # 1e6
@@ -52,6 +52,8 @@ class SACPool(OffPolicyAlgorithm):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
         pool_size: int = 6,
+        selector: SACPolicy = None,
+        load_sub_policies: str = None,
     ):
         super().__init__(
             policy,
@@ -89,14 +91,11 @@ class SACPool(OffPolicyAlgorithm):
         self.target_update_interval = target_update_interval
         self.ent_coef_optimizer: Optional[th.optim.Adam] = None
         self.pool_size = pool_size
+        self.selector = selector
+        self.load_sub_policies = load_sub_policies
 
         if _init_setup_model:
             self._setup_model()
-            
-    def _create_aliases(self) -> None:
-        self.actor = self.policy.actor
-        self.critic = self.policy.critic
-        self.critic_target = self.policy.critic_target
     
     def _setup_model(self) -> None:
         super()._setup_model()
@@ -132,8 +131,10 @@ class SACPool(OffPolicyAlgorithm):
             # this will throw an error if a malformed string (different from 'auto')
             # is passed
             self.ent_coef_tensor = th.tensor(float(self.ent_coef), device=self.device)
-    
-    # TODO
+
+        if self.load_sub_policies:
+            pass
+        
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
@@ -184,13 +185,13 @@ class SACPool(OffPolicyAlgorithm):
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
                 # Compute the next Q values: min over all critics targets
-                next_q_values = th.stack(self.critic_target(replay_data.next_observations, next_actions, pool_action=not self.actor.mean_out), dim=-1)
+                next_q_values = th.stack(self.critic_target(replay_data.next_observations, next_actions, pool_action=not (self.actor.out_type=="mean")), dim=-1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
                 next_q_values = next_q_values.squeeze()
                 # add entropy term
-                if self.actor.mean_out:
+                if self.actor.out_type == "mean":
                     next_q_values = next_q_values - ent_coef * next_log_prob[:, None]
-                else:
+                elif self.actor.out_type == "single":
                     next_q_values = next_q_values - (ent_coef * next_log_prob).transpose(0,1)
                 # td error + entropy term
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
@@ -215,7 +216,7 @@ class SACPool(OffPolicyAlgorithm):
             # Compute actor loss
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Min over all critic networks
-            critic_out = self.critic(replay_data.observations, actions_pi, pool_action= not self.actor.mean_out)
+            critic_out = self.critic(replay_data.observations, actions_pi, pool_action= not (self.actor.out_type=="mean"))
             q_values_pi = th.stack(critic_out, dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=2, keepdim=True)
             self.actor.optimizer.zero_grad()
