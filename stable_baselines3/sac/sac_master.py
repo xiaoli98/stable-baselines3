@@ -51,8 +51,12 @@ class SACMasterPolicy(SACPolicy):
         self.weighting_scheme = weighting_scheme
 
         # we modify the action space to match the number of subpolicies
+        
+        master_ob_dim = np.prod(observation_space.shape) + self.n_actions * np.prod(self.env_action_space.shape)
+        master_ob_space = spaces.Box(-np.inf, np.inf, [master_ob_dim])
+        
         super().__init__(
-            observation_space,
+            master_ob_space,
             self.n_subpolicies, #action_space
             lr_schedule,
             net_arch,
@@ -79,7 +83,7 @@ class SACMasterPolicy(SACPolicy):
                                       action_space,
                                       lr_schedule)
                 print(f"loading from: {sub_policies_path+checkpoints[i]}...")
-                subpolicy.load_state_dict(th.load(sub_policies_path+checkpoints[i]))
+                subpolicy.load_state_dict(th.load(sub_policies_path+checkpoints[i], map_location=th.device("cpu")))
                 self.subpolicies.append(subpolicy)
         for params in self.subpolicies.parameters():
             params.requires_grad = False
@@ -94,12 +98,18 @@ class SACMasterPolicy(SACPolicy):
                 "and documentation for more information: https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html#vecenv-api-vs-gym-api"
             )
         if not th.is_tensor(observation):
-            observation, vectorized_env = self.obs_to_tensor(observation)
+            # observation, vectorized_env = self.obs_to_tensor(observation)
+            observation = th.as_tensor(observation)
         pool_output = []
         with th.no_grad():
             for subpolicy in self.subpolicies:
                 pool_output.append(subpolicy.actor(observation, deterministic))
         return th.stack(pool_output)
+    
+    def get_weights(self, observation: PyTorchObs, deterministic: bool= False):
+        if not th.is_tensor(observation):
+            observation = th.as_tensor(observation)
+        return self.actor(observation, deterministic)
 
     def weighted_action(self, actions, weights):
         if not th.is_tensor(weights):
@@ -110,8 +120,14 @@ class SACMasterPolicy(SACPolicy):
         return  out
     
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
+        pool_output = self.get_pool_out(observation, deterministic=True)
         # [BS x NP]
-        weights = self.actor(observation, deterministic).transpose(0,1)
+        print(f"pool_out before: {pool_output}")
+        master_ob = th.flatten(observation)
+        print(f"master ob before: {master_ob}")
+        master_ob = th.cat([master_ob, th.flatten(pool_output)])
+        print(f"master ob after: {master_ob}")
+        weights = self.get_weights(master_ob, deterministic).transpose(0,1)
         # scale into [0,1] 
         if self.weighting_scheme == "classic":
             weights += 1
@@ -120,7 +136,6 @@ class SACMasterPolicy(SACPolicy):
             weights -= weights.min()
             weights /= weights.max() 
 
-        pool_output = self.get_pool_out(observation, deterministic=True)
         out = self.weighted_action(pool_output, weights)
         return out, weights
         
@@ -159,6 +174,7 @@ class SACMasterPolicy(SACPolicy):
             )
 
         obs_tensor, vectorized_env = self.obs_to_tensor(observation)
+        # obs_tensor = th.as_tensor(observation)
 
         with th.no_grad():
             actions, weights = self._predict(obs_tensor, deterministic=deterministic)

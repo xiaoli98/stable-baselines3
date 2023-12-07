@@ -7,13 +7,17 @@ from gymnasium import spaces
 from torch.nn import functional as F
 
 from stable_baselines3.common.buffers import ReplayBuffer, DictReplayBuffer
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
-from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
+from stable_baselines3.common.type_aliases import GymEnv, RolloutReturn, MaybeCallback, Schedule, TrainFreq, TrainFrequencyUnit
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 from stable_baselines3.her.her_replay_buffer import HerReplayBuffer
 from stable_baselines3.sac.policies import Actor, CnnPolicy, MlpPolicy, MultiInputPolicy, SACPolicy
+from stable_baselines3.common.utils import safe_mean, should_collect_more_steps
+from stable_baselines3.common.vec_env import VecEnv
+
 
 SelfSAC = TypeVar("SelfSAC", bound="SAC")
 
@@ -401,6 +405,9 @@ class SACMaster(SAC):
         )
     
     def _setup_model(self) -> None:
+        master_ob_dim = np.prod(self.observation_space.shape) + np.prod(self.n_subpolicies.shape) * np.prod(self.action_space.shape)
+        master_ob_space = spaces.Box(-np.inf, np.inf, [master_ob_dim])
+
         if self.replay_buffer_class is None:
             if isinstance(self.observation_space, spaces.Dict):
                 self.replay_buffer_class = DictReplayBuffer
@@ -415,14 +422,18 @@ class SACMaster(SAC):
                 replay_buffer_kwargs["env"] = self.env
             self.replay_buffer = self.replay_buffer_class(
                 self.buffer_size,
-                self.observation_space,
-                self.n_subpolicies,
+                master_ob_space, #observation space
+                self.n_subpolicies,     #action space
                 device=self.device,
                 n_envs=self.n_envs,
                 optimize_memory_usage=self.optimize_memory_usage,
                 **replay_buffer_kwargs,
             )
         return super()._setup_model()
+    
+    def train(self):
+        # FIXME MALIO, during training, obs from replay is not constructed with subpolicies actions
+        pass
     
     def _sample_action(
         self,
@@ -434,7 +445,9 @@ class SACMaster(SAC):
         if self.num_timesteps < learning_starts and not (self.use_sde and self.use_sde_at_warmup):
             # Warmup phase
             weights = np.random.random([np.prod(self.n_subpolicies.shape), n_envs])
-            pool_out = self.policy.get_pool_out(self._last_obs)
+            with th.no_grad():
+                pool_out = self.policy.get_pool_out(self._last_obs)
+                flatten_pool_out = th.flatten(th.permute(pool_out, (1,0,2)), start_dim=1)
             unscaled_action = self.policy.weighted_action(pool_out, weights)
             unscaled_action = unscaled_action.cpu().numpy()
         else:
@@ -442,20 +455,151 @@ class SACMaster(SAC):
             # we assume that the policy uses tanh to scale the action
             # We use non-deterministic action in the case of SAC, for TD3, it does not matter
             assert self._last_obs is not None, "self._last_obs was not set"
-            unscaled_action, weights, _ = self.predict(self._last_obs, deterministic=False)
+            with th.no_grad():
+                pool_out = self.policy.get_pool_out(self._last_obs, deterministic=True)
+            master_obs = th.flatten(th.as_tensor(self._last_obs), start_dim=1)
+            flatten_pool_out = th.flatten(th.permute(pool_out, (1,0,2)), start_dim=1)
+            master_obs = th.cat([master_obs, flatten_pool_out], dim=1)
+            with th.no_grad():
+                weights = self.policy.get_weights(master_obs, deterministic=False)
+            if action_noise is not None:# Add noise to the action/weights (improve exploration)
+                weights = np.clip(weights + action_noise(), -1, 1)
+            unscaled_action = self.policy.weighted_action(pool_out, weights)
+            # unscaled_action, weights, _ = self.predict(self._last_obs, deterministic=False)
+        action = unscaled_action
+            
+        # # Rescale the action from [low, high] to [-1, 1]
+        # if isinstance(self.action_space, spaces.Box):
+        #     scaled_action = self.policy.scale_action(unscaled_action)
+        #     # Add noise to the action (improve exploration)
+        #     if action_noise is not None:
+        #         scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
 
-        # Rescale the action from [low, high] to [-1, 1]
-        if isinstance(self.action_space, spaces.Box):
-            scaled_action = self.policy.scale_action(unscaled_action)
-            # Add noise to the action (improve exploration)
-            if action_noise is not None:
-                scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
+        #     # We store the scaled action in the buffer
+        #     buffer_action = scaled_action
+        #     action = self.policy.unscale_action(scaled_action)
+        # else:
+        #     # Discrete case, no need to normalize or clip
+        #     buffer_action = unscaled_action
+        #     action = buffer_action
+        return action, weights, flatten_pool_out.cpu().numpy()
+    
+    def _store_transition(self,
+            replay_buffer: ReplayBuffer,
+            buffer_action: np.ndarray,
+            new_obs: Union[np.ndarray, Dict[str, np.ndarray]],
+            reward: np.ndarray,
+            dones: np.ndarray,
+            infos: List[Dict[str, Any]],
+        ) -> None:
+        if (self._last_original_obs is not None and 
+            self._last_original_obs.shape != new_obs.shape):
+            # pool out is not integrated
+            pool_out = self.policy.get_pool_out(self._last_original_obs, deterministic=True)
+            flatten_pool_out = th.flatten(th.permute(pool_out, (1,0,2)), start_dim=1)
+            self._last_original_obs = self._last_original_obs.reshape(self._last_original_obs.shape[0],-1)
+            self._last_original_obs = np.concatenate([self._last_original_obs, flatten_pool_out], axis=1)
+        # if self._last_obs.shape != new_obs.shape:
+        #     pool_out = self.policy.get_pool_out(self._last_obs, deterministic=True)
+        #     flatten_pool_out = th.flatten(th.permute(pool_out, (1,0,2)), start_dim=1)
+        #     self._last_obs = self._last_obs.reshape(self._last_obs.shape[0],-1)
+        #     self._last_obs = np.concatenate([self._last_obs, flatten_pool_out], axis=1)
+        return super()._store_transition(replay_buffer, buffer_action, new_obs, reward, dones, infos)
+    
+    def collect_rollouts(
+        self,
+        env: VecEnv,
+        callback: BaseCallback,
+        train_freq: TrainFreq,
+        replay_buffer: ReplayBuffer,
+        action_noise: Optional[ActionNoise] = None,
+        learning_starts: int = 0,
+        log_interval: Optional[int] = None,
+    ) -> RolloutReturn:
+        """
+        Collect experiences and store them into a ``ReplayBuffer``.
 
-            # We store the scaled action in the buffer
-            buffer_action = scaled_action
-            action = self.policy.unscale_action(scaled_action)
-        else:
-            # Discrete case, no need to normalize or clip
-            buffer_action = unscaled_action
-            action = buffer_action
-        return action, weights
+        :param env: The training environment
+        :param callback: Callback that will be called at each step
+            (and at the beginning and end of the rollout)
+        :param train_freq: How much experience to collect
+            by doing rollouts of current policy.
+            Either ``TrainFreq(<n>, TrainFrequencyUnit.STEP)``
+            or ``TrainFreq(<n>, TrainFrequencyUnit.EPISODE)``
+            with ``<n>`` being an integer greater than 0.
+        :param action_noise: Action noise that will be used for exploration
+            Required for deterministic policy (e.g. TD3). This can also be used
+            in addition to the stochastic policy for SAC.
+        :param learning_starts: Number of steps before learning for the warm-up phase.
+        :param replay_buffer:
+        :param log_interval: Log data every ``log_interval`` episodes
+        :return:
+        """
+        # Switch to eval mode (this affects batch norm / dropout)
+        self.policy.set_training_mode(False)
+
+        num_collected_steps, num_collected_episodes = 0, 0
+
+        assert isinstance(env, VecEnv), "You must pass a VecEnv"
+        assert train_freq.frequency > 0, "Should at least collect one step or episode."
+
+        if env.num_envs > 1:
+            assert train_freq.unit == TrainFrequencyUnit.STEP, "You must use only one env when doing episodic training."
+
+        if self.use_sde:
+            self.actor.reset_noise(env.num_envs)
+
+        callback.on_rollout_start()
+        continue_training = True
+        while should_collect_more_steps(train_freq, num_collected_steps, num_collected_episodes):
+            if self.use_sde and self.sde_sample_freq > 0 and num_collected_steps % self.sde_sample_freq == 0:
+                # Sample a new noise matrix
+                self.actor.reset_noise(env.num_envs)
+
+            # Select action randomly or according to policy
+            actions, buffer_actions, pool_out = self._sample_action(learning_starts, action_noise, env.num_envs)
+
+            # Rescale and perform action
+            new_obs, rewards, dones, infos = env.step(actions)
+            new_obs = new_obs.reshape(new_obs.shape[0],-1)
+            #concat pool outputs to the observation
+            new_obs = np.concatenate([new_obs, pool_out], axis=1)
+            self.num_timesteps += env.num_envs
+            num_collected_steps += 1
+
+            # Give access to local variables
+            callback.update_locals(locals())
+            # Only stop training if return value is False, not when it is None.
+            if not callback.on_step():
+                return RolloutReturn(num_collected_steps * env.num_envs, num_collected_episodes, continue_training=False)
+
+            # Retrieve reward and episode length if using Monitor wrapper
+            self._update_info_buffer(infos, dones)
+
+            # Store data in replay buffer (normalized action and unnormalized observation)
+            self._store_transition(replay_buffer, buffer_actions, new_obs, rewards, dones, infos)  # type: ignore[arg-type]
+
+            self._update_current_progress_remaining(self.num_timesteps, self._total_timesteps)
+
+            # For DQN, check if the target network should be updated
+            # and update the exploration schedule
+            # For SAC/TD3, the update is dones as the same time as the gradient update
+            # see https://github.com/hill-a/stable-baselines/issues/900
+            self._on_step()
+
+            for idx, done in enumerate(dones):
+                if done:
+                    # Update stats
+                    num_collected_episodes += 1
+                    self._episode_num += 1
+
+                    if action_noise is not None:
+                        kwargs = dict(indices=[idx]) if env.num_envs > 1 else {}
+                        action_noise.reset(**kwargs)
+
+                    # Log training infos
+                    if log_interval is not None and self._episode_num % log_interval == 0:
+                        self._dump_logs()
+        callback.on_rollout_end()
+
+        return RolloutReturn(num_collected_steps * env.num_envs, num_collected_episodes, continue_training)
