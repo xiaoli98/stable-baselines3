@@ -359,7 +359,8 @@ class SACMaster(SAC):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
         load_subpolicies: bool = True,
-        sub_policies_path: str = None,
+        sub_policies_path: Optional[str] = None,
+        weighting_scheme: str = "classic",
     ):
         if load_subpolicies:
             self.n_subpolicies = spaces.Box(0,1, [len(os.listdir(sub_policies_path))])
@@ -367,6 +368,7 @@ class SACMaster(SAC):
             policy_kwargs["load_subpolicies"] = load_subpolicies
             policy_kwargs["sub_policies_path"] = sub_policies_path
             policy_kwargs["master_action_space"] = self.n_subpolicies
+            policy_kwargs["weighting_scheme"] = weighting_scheme
         
         super().__init__(
             policy,

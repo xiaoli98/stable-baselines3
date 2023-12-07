@@ -43,22 +43,12 @@ class SACMasterPolicy(SACPolicy):
         load_subpolicies: bool = True,
         sub_policies_path: str = None,
         master_action_space: Optional[spaces.Box] = None,
+        weighting_scheme: str = "classic",
     ):
-        self.subpolicies = []
-        if load_subpolicies:
-            assert sub_policies_path is not None, "please specify where to load subpolicies"
-            checkpoints = os.listdir(sub_policies_path)
-            n_subpolicies = np.prod(master_action_space.shape)
-            for i in range(n_subpolicies):
-                subpolicy = SACPolicy(observation_space,
-                                      action_space,
-                                      lr_schedule)
-                print(f"loading from: {sub_policies_path+checkpoints[i]}")
-                subpolicy.load_state_dict(th.load(sub_policies_path+checkpoints[i], map_location=th.device("cpu")))
-                self.subpolicies.append(subpolicy)
         self.n_subpolicies = master_action_space
         self.env_action_space = action_space
         self.n_actions = np.prod(master_action_space.shape)
+        self.weighting_scheme = weighting_scheme
 
         # we modify the action space to match the number of subpolicies
         super().__init__(
@@ -79,6 +69,20 @@ class SACMasterPolicy(SACPolicy):
             n_critics,
             share_features_extractor,
         )
+        self.subpolicies = th.nn.ModuleList()
+        if load_subpolicies:
+            assert sub_policies_path is not None, "please specify where to load subpolicies"
+            checkpoints = os.listdir(sub_policies_path)
+            n_subpolicies = np.prod(master_action_space.shape)
+            for i in range(n_subpolicies):
+                subpolicy = SACPolicy(observation_space,
+                                      action_space,
+                                      lr_schedule)
+                print(f"loading from: {sub_policies_path+checkpoints[i]}...")
+                subpolicy.load_state_dict(th.load(sub_policies_path+checkpoints[i]))
+                self.subpolicies.append(subpolicy)
+        for params in self.subpolicies.parameters():
+            params.requires_grad = False
         
     def get_pool_out(self, observation: PyTorchObs, deterministic: bool =True):
         if isinstance(observation, tuple) and len(observation) == 2 and isinstance(observation[1], dict):
@@ -89,12 +93,12 @@ class SACMasterPolicy(SACPolicy):
                 "See related issue https://github.com/DLR-RM/stable-baselines3/issues/1694 "
                 "and documentation for more information: https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html#vecenv-api-vs-gym-api"
             )
-
-        obs_tensor, vectorized_env = self.obs_to_tensor(observation)
+        if not th.is_tensor(observation):
+            observation, vectorized_env = self.obs_to_tensor(observation)
         pool_output = []
         with th.no_grad():
             for subpolicy in self.subpolicies:
-                pool_output.append(subpolicy.actor(obs_tensor, deterministic))
+                pool_output.append(subpolicy.actor(observation, deterministic))
         return th.stack(pool_output)
 
     def weighted_action(self, actions, weights):
@@ -109,8 +113,13 @@ class SACMasterPolicy(SACPolicy):
         # [BS x NP]
         weights = self.actor(observation, deterministic).transpose(0,1)
         # scale into [0,1] 
-        weights -= weights.min()
-        weights /= weights.max() 
+        if self.weighting_scheme == "classic":
+            weights += 1
+            weights /= 2
+        elif self.weighting_scheme == "minmax":
+            weights -= weights.min()
+            weights /= weights.max() 
+
         pool_output = self.get_pool_out(observation, deterministic=True)
         out = self.weighted_action(pool_output, weights)
         return out, weights
