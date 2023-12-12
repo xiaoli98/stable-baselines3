@@ -21,6 +21,8 @@ from stable_baselines3.common.torch_layers import (
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.sac.policies import SACPolicy
 
+from stable_baselines3.common.utils import is_vectorized_observation, obs_as_tensor
+
 class SACMasterPolicy(SACPolicy):
     def __init__(
         self,
@@ -51,12 +53,12 @@ class SACMasterPolicy(SACPolicy):
         self.weighting_scheme = weighting_scheme
 
         # we modify the action space to match the number of subpolicies
-        
         master_ob_dim = np.prod(observation_space.shape) + self.n_actions * np.prod(self.env_action_space.shape)
-        master_ob_space = spaces.Box(-np.inf, np.inf, [master_ob_dim])
+        self.master_ob_space = spaces.Box(-np.inf, np.inf, [master_ob_dim])
         
         super().__init__(
-            master_ob_space,
+            self.master_ob_space,
+            # observation_space,
             self.n_subpolicies, #action_space
             lr_schedule,
             net_arch,
@@ -77,6 +79,7 @@ class SACMasterPolicy(SACPolicy):
         if load_subpolicies:
             assert sub_policies_path is not None, "please specify where to load subpolicies"
             checkpoints = os.listdir(sub_policies_path)
+            checkpoints= sorted(checkpoints)
             n_subpolicies = np.prod(master_action_space.shape)
             for i in range(n_subpolicies):
                 subpolicy = SACPolicy(observation_space,
@@ -119,15 +122,17 @@ class SACMasterPolicy(SACPolicy):
         out = out / th.sum(weights, dim=0).unsqueeze(-1)
         return  out
     
-    def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        pool_output = self.get_pool_out(observation, deterministic=True)
+    def _predict(self, observation: PyTorchObs, pool_output, deterministic: bool = False) -> th.Tensor:
+        # pool_output = self.get_pool_out(observation, deterministic=True)
         # [BS x NP]
-        print(f"pool_out before: {pool_output}")
-        master_ob = th.flatten(observation)
-        print(f"master ob before: {master_ob}")
-        master_ob = th.cat([master_ob, th.flatten(pool_output)])
-        print(f"master ob after: {master_ob}")
-        weights = self.get_weights(master_ob, deterministic).transpose(0,1)
+        # print(f"pool_out before: {pool_output.shape}")
+        # print(f"observation: {observation.shape}")
+        # master_ob = th.flatten(observation, start_dim=1)
+        # print(f"master ob before: {master_ob.shape}")
+        # master_ob = th.cat([master_ob, th.flatten(pool_output, start_dim=1)], dim=1)
+        # print(f"master ob after: {master_ob.shape}")
+        # weights = self.get_weights(master_ob, deterministic).transpose(0,1)
+        weights = self.get_weights(observation, deterministic).transpose(0,1)
         # scale into [0,1] 
         if self.weighting_scheme == "classic":
             weights += 1
@@ -172,12 +177,18 @@ class SACMasterPolicy(SACPolicy):
                 "See related issue https://github.com/DLR-RM/stable-baselines3/issues/1694 "
                 "and documentation for more information: https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html#vecenv-api-vs-gym-api"
             )
-
-        obs_tensor, vectorized_env = self.obs_to_tensor(observation)
+        pool_output = self.get_pool_out(observation, deterministic=True)
+        pool_output_cpu = pool_output.cpu().numpy()
+        master_ob = observation.reshape(observation.shape[0], -1) #aka flatten on dim=1
+        # print(f"master ob before: {master_ob.shape}")
+        master_ob = np.concatenate([master_ob, pool_output_cpu.reshape(pool_output_cpu.shape[0], -1)], axis=1)
+        # print(f"master_ob after: {master_ob.shape}")
+        
+        obs_tensor, vectorized_env = self.obs_to_tensor(master_ob)
         # obs_tensor = th.as_tensor(observation)
 
         with th.no_grad():
-            actions, weights = self._predict(obs_tensor, deterministic=deterministic)
+            actions, weights = self._predict(obs_tensor, pool_output, deterministic=deterministic)
         # Convert to numpy, and reshape to the original action shape
         actions = actions.cpu().numpy().reshape((-1, *self.env_action_space.shape))  # type: ignore[misc]
         weights = weights.cpu().numpy().reshape((-1, self.n_actions))
