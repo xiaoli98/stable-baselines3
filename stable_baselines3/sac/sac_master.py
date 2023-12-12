@@ -104,7 +104,7 @@ class SACMasterPolicy(SACPolicy):
             )
         if not th.is_tensor(observation):
             # observation, vectorized_env = self.obs_to_tensor(observation)
-            observation = th.as_tensor(observation)
+            observation = th.as_tensor(observation, device=self.device)
         pool_output = []
         with th.no_grad():
             for subpolicy in self.subpolicies:
@@ -178,9 +178,11 @@ class SACMasterPolicy(SACPolicy):
                 "and documentation for more information: https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html#vecenv-api-vs-gym-api"
             )
         pool_output = self.get_pool_out(observation, deterministic=True)
+        # [N_SUBPOLICIES, BS, OUTPUT]
         pool_output_cpu = pool_output.cpu().numpy()
+        # [BS, N_SUBPOLICIES, OUTPUT]
+        pool_output_cpu = np.transpose(pool_output_cpu, [1,0,2])
         master_ob = observation.reshape(observation.shape[0], -1) #aka flatten on dim=1
-        # print(f"master ob before: {master_ob.shape}")
         master_ob = np.concatenate([master_ob, pool_output_cpu.reshape(pool_output_cpu.shape[0], -1)], axis=1)
         # print(f"master_ob after: {master_ob.shape}")
         

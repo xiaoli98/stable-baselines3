@@ -452,18 +452,26 @@ class SACMaster(SAC):
 
             replay_ob = replay_data.observations
             # add subpolicies output to replay data
-            pool_out = self.policy.get_pool_out(replay_ob, deterministic=True).cpu()
+            pool_out = self.policy.get_pool_out(replay_ob, deterministic=True)
             flatten_pool_out = th.flatten(th.permute(pool_out, (1,0,2)), start_dim=1)
-            replay_ob = np.reshape(replay_ob, (replay_ob.shape[0],-1))
-            replay_ob = np.concatenate([replay_ob, flatten_pool_out], axis=1)
-            replay_ob = th.as_tensor(replay_ob)
+            if not th.is_tensor(replay_ob):
+                replay_ob = np.reshape(replay_ob, (replay_ob.shape[0],-1))
+                replay_ob = np.concatenate([replay_ob, flatten_pool_out.cpu()], axis=1)
+                replay_ob = th.as_tensor(replay_ob)
+            else:
+                replay_ob = th.flatten(replay_ob, start_dim=1)
+                replay_ob = th.concat([replay_ob, flatten_pool_out], dim=1)
             
             replay_next_ob = replay_data.next_observations
-            pool_out = self.policy.get_pool_out(replay_next_ob, deterministic=True).cpu()
+            pool_out = self.policy.get_pool_out(replay_next_ob, deterministic=True)
             flatten_pool_out = th.flatten(th.permute(pool_out, (1,0,2)), start_dim=1)
-            replay_next_ob = np.reshape(replay_next_ob, (replay_next_ob.shape[0],-1))
-            replay_next_ob = np.concatenate([replay_next_ob, flatten_pool_out], axis=1)
-            replay_next_ob = th.as_tensor(replay_next_ob)
+            if not th.is_tensor(replay_next_ob):
+                replay_next_ob = np.reshape(replay_next_ob, (replay_next_ob.shape[0],-1))
+                replay_next_ob = np.concatenate([replay_next_ob, flatten_pool_out.cpu()], axis=1)
+                replay_next_ob = th.as_tensor(replay_next_ob)
+            else:
+                replay_next_ob = th.flatten(replay_next_ob, start_dim=1)
+                replay_next_ob = th.concat([replay_next_ob, flatten_pool_out], dim=1)
             
             # We need to sample because `log_std` may have changed between two gradient steps
             if self.use_sde:
@@ -598,5 +606,20 @@ class SACMaster(SAC):
             # We use non-deterministic action in the case of SAC, for TD3, it does not matter
             assert self._last_obs is not None, "self._last_obs was not set"
             unscaled_action, weights, _ = self.predict(self._last_obs, deterministic=False)
+
         action = unscaled_action
+        # Rescale the action from [low, high] to [-1, 1]
+        # if isinstance(self.action_space, spaces.Box):
+        #     scaled_action = self.policy.scale_action(unscaled_action)
+        #     # Add noise to the action (improve exploration)
+        #     if action_noise is not None:
+        #         scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
+
+        #     # We store the scaled action in the buffer
+        #     buffer_action = scaled_action
+        #     action = self.policy.unscale_action(scaled_action)
+        # else:
+        #     # Discrete case, no need to normalize or clip
+        #     buffer_action = unscaled_action
+        #     action = buffer_action
         return action, weights
