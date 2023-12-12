@@ -18,6 +18,7 @@ from stable_baselines3.common.torch_layers import (
     create_mlp,
     get_actor_critic_arch,
 )
+from stable_baselines3.common.noise import OrnsteinUhlenbeckActionNoise
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.sac.policies import SACPolicy
 
@@ -51,6 +52,7 @@ class SACMasterPolicy(SACPolicy):
         self.env_action_space = action_space
         self.n_actions = np.prod(master_action_space.shape)
         self.weighting_scheme = weighting_scheme
+        self.weights_noise = OrnsteinUhlenbeckActionNoise(mean=np.zeros(1), sigma=0.1*np.ones(1), dtype=np.float32)
 
         # we modify the action space to match the number of subpolicies
         master_ob_dim = np.prod(observation_space.shape) + self.n_actions * np.prod(self.env_action_space.shape)
@@ -79,7 +81,7 @@ class SACMasterPolicy(SACPolicy):
         if load_subpolicies:
             assert sub_policies_path is not None, "please specify where to load subpolicies"
             checkpoints = os.listdir(sub_policies_path)
-            checkpoints= sorted(checkpoints)
+            checkpoints = sorted(checkpoints)
             n_subpolicies = np.prod(master_action_space.shape)
             for i in range(n_subpolicies):
                 subpolicy = SACPolicy(observation_space,
@@ -119,20 +121,18 @@ class SACMasterPolicy(SACPolicy):
             weights = th.tensor(weights, device=self.device)
         out = weights.unsqueeze(-1) * actions
         out = th.sum(out, dim=0)
-        out = out / th.sum(weights, dim=0).unsqueeze(-1)
+        sum = th.sum(weights, dim=0).unsqueeze(-1)
+        out = out / sum
         return  out
     
     def _predict(self, observation: PyTorchObs, pool_output, deterministic: bool = False) -> th.Tensor:
         # pool_output = self.get_pool_out(observation, deterministic=True)
         # [BS x NP]
-        # print(f"pool_out before: {pool_output.shape}")
-        # print(f"observation: {observation.shape}")
-        # master_ob = th.flatten(observation, start_dim=1)
-        # print(f"master ob before: {master_ob.shape}")
-        # master_ob = th.cat([master_ob, th.flatten(pool_output, start_dim=1)], dim=1)
-        # print(f"master ob after: {master_ob.shape}")
-        # weights = self.get_weights(master_ob, deterministic).transpose(0,1)
-        weights = self.get_weights(observation, deterministic).transpose(0,1)
+        
+        weights = self.actor(observation, deterministic).transpose(0,1)
+        if not deterministic:
+            noise = th.as_tensor(self.weights_noise(), device=self.device)
+            weights = th.clip(weights+noise, -0.999, 1)
         # scale into [0,1] 
         if self.weighting_scheme == "classic":
             weights += 1
@@ -207,7 +207,6 @@ class SACMasterPolicy(SACPolicy):
             assert isinstance(actions, np.ndarray)
             actions = actions.squeeze(axis=0)
             weights = weights.squeeze(axis=0)
-
         return actions, weights, state  # type: ignore[return-value]
     
     def scale_action(self, action: np.ndarray) -> np.ndarray:

@@ -598,37 +598,5 @@ class SACMaster(SAC):
             # We use non-deterministic action in the case of SAC, for TD3, it does not matter
             assert self._last_obs is not None, "self._last_obs was not set"
             unscaled_action, weights, _ = self.predict(self._last_obs, deterministic=False)
-
         action = unscaled_action
-        # Rescale the action from [low, high] to [-1, 1]
-        # if isinstance(self.action_space, spaces.Box):
-        #     scaled_action = self.policy.scale_action(unscaled_action)
-        #     # Add noise to the action (improve exploration)
-        #     if action_noise is not None:
-        #         scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
-
-        #     # We store the scaled action in the buffer
-        #     buffer_action = scaled_action
-        #     action = self.policy.unscale_action(scaled_action)
-        # else:
-        #     # Discrete case, no need to normalize or clip
-        #     buffer_action = unscaled_action
-        #     action = buffer_action
         return action, weights
-            
-        # # Rescale the action from [low, high] to [-1, 1]
-        # if isinstance(self.action_space, spaces.Box):
-        #     scaled_action = self.policy.scale_action(unscaled_action)
-        #     # Add noise to the action (improve exploration)
-        #     if action_noise is not None:
-        #         scaled_action = np.clip(scaled_action + action_noise(), -1, 1)
-
-        #     # We store the scaled action in the buffer
-        #     buffer_action = scaled_action
-        #     action = self.policy.unscale_action(scaled_action)
-        # else:
-        #     # Discrete case, no need to normalize or clip
-        #     buffer_action = unscaled_action
-        #     action = buffer_action
-        return action, weights, flatten_pool_out.cpu().numpy()
-    
