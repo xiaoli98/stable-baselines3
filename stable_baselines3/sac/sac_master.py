@@ -21,6 +21,21 @@ from stable_baselines3.common.torch_layers import (
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.sac.policies import SACPolicy
 
+class LinearDescrease():
+    def __init__(self, start, end, total_steps) -> None:
+        self.start = start
+        self.end = end
+        self.decreaseFactor = start/total_steps
+        self.step = 0
+        
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        value = self.start - self.decreaseFactor*self.step 
+        self.step += 1
+        return value
+
 class SACMasterPolicy(SACPolicy):
     def __init__(
         self,
@@ -43,17 +58,22 @@ class SACMasterPolicy(SACPolicy):
         load_subpolicies: bool = True,
         sub_policies_path: str = None,
         master_action_space: Optional[spaces.Box] = None,
-        weighting_scheme: str = "classic",
+        weighting_scheme: str = "average",
+        eta: Tuple[int] = (1, 0, 10000)
     ):
         self.n_subpolicies = master_action_space
         self.env_action_space = action_space
         self.n_actions = np.prod(master_action_space.shape)
         self.weighting_scheme = weighting_scheme
+        
+        # control how the subpolicies out affects the sac out 
+        self.eta = LinearDescrease(*eta)
 
         # we modify the action space to match the number of subpolicies
         super().__init__(
             observation_space,
-            self.n_subpolicies, #action_space
+            # self.n_subpolicies, #action_space
+            action_space,
             lr_schedule,
             net_arch,
             activation_fn,
@@ -110,19 +130,29 @@ class SACMasterPolicy(SACPolicy):
         return  out
     
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        # [BS x NP]
-        weights = self.actor(observation, deterministic).transpose(0,1)
-        # scale into [0,1] 
-        if self.weighting_scheme == "classic":
-            weights += 1
-            weights /= 2
-        elif self.weighting_scheme == "minmax":
-            weights -= weights.min()
-            weights /= weights.max() 
+        if self.weighting_scheme == "average":
+            weights = th.ones(self.n_subpolicies.shape)
+            act = self.actor(observation, deterministic)
+            
+            pool_output = self.get_pool_out(observation, deterministic=True)
+            weighted_out = self.weighted_action(pool_output, weights)
+            act_out = act + (next(self.eta) * weighted_out)
+            # print(f"act_out:{act_out}\nact: {act}\nweighted out: {weighted_out}")
+            return act_out, act_out
+        else:
+            # [BS x NP]
+            weights = self.actor(observation, deterministic).transpose(0,1)
+            # scale into [0,1] 
+            if self.weighting_scheme == "classic":
+                weights += 1
+                weights /= 2
+            elif self.weighting_scheme == "minmax":
+                weights -= weights.min()
+                weights /= weights.max() 
 
-        pool_output = self.get_pool_out(observation, deterministic=True)
-        out = self.weighted_action(pool_output, weights)
-        return out, weights
+            pool_output = self.get_pool_out(observation, deterministic=True)
+            out = self.weighted_action(pool_output, weights)
+            return out, weights
         
     def predict(
         self,

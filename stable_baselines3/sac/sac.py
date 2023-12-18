@@ -360,7 +360,8 @@ class SACMaster(SAC):
         _init_setup_model: bool = True,
         load_subpolicies: bool = True,
         sub_policies_path: Optional[str] = None,
-        weighting_scheme: str = "classic",
+        weighting_scheme: str = "average",
+        eta: Tuple[int] = (1, 0, 10000),
     ):
         if load_subpolicies:
             self.n_subpolicies = spaces.Box(0,1, [len(os.listdir(sub_policies_path))])
@@ -369,6 +370,7 @@ class SACMaster(SAC):
             policy_kwargs["sub_policies_path"] = sub_policies_path
             policy_kwargs["master_action_space"] = self.n_subpolicies
             policy_kwargs["weighting_scheme"] = weighting_scheme
+            policy_kwargs["eta"] = eta
         
         super().__init__(
             policy,
@@ -401,27 +403,27 @@ class SACMaster(SAC):
         )
     
     def _setup_model(self) -> None:
-        if self.replay_buffer_class is None:
-            if isinstance(self.observation_space, spaces.Dict):
-                self.replay_buffer_class = DictReplayBuffer
-            else:
-                self.replay_buffer_class = ReplayBuffer
-        if self.replay_buffer is None:
-            # Make a local copy as we should not pickle
-            # the environment when using HerReplayBuffer
-            replay_buffer_kwargs = self.replay_buffer_kwargs.copy()
-            if issubclass(self.replay_buffer_class, HerReplayBuffer):
-                assert self.env is not None, "You must pass an environment when using `HerReplayBuffer`"
-                replay_buffer_kwargs["env"] = self.env
-            self.replay_buffer = self.replay_buffer_class(
-                self.buffer_size,
-                self.observation_space,
-                self.n_subpolicies,
-                device=self.device,
-                n_envs=self.n_envs,
-                optimize_memory_usage=self.optimize_memory_usage,
-                **replay_buffer_kwargs,
-            )
+        # if self.replay_buffer_class is None:
+        #     if isinstance(self.observation_space, spaces.Dict):
+        #         self.replay_buffer_class = DictReplayBuffer
+        #     else:
+        #         self.replay_buffer_class = ReplayBuffer
+        # if self.replay_buffer is None:
+        #     # Make a local copy as we should not pickle
+        #     # the environment when using HerReplayBuffer
+        #     replay_buffer_kwargs = self.replay_buffer_kwargs.copy()
+        #     if issubclass(self.replay_buffer_class, HerReplayBuffer):
+        #         assert self.env is not None, "You must pass an environment when using `HerReplayBuffer`"
+        #         replay_buffer_kwargs["env"] = self.env
+        #     self.replay_buffer = self.replay_buffer_class(
+        #         self.buffer_size,
+        #         self.observation_space,
+        #         self.n_subpolicies,
+        #         device=self.device,
+        #         n_envs=self.n_envs,
+        #         optimize_memory_usage=self.optimize_memory_usage,
+        #         **replay_buffer_kwargs,
+        #     )
         return super()._setup_model()
     
     def _sample_action(
