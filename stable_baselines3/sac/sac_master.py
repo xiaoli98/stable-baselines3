@@ -44,11 +44,13 @@ class SACMasterPolicy(SACPolicy):
         sub_policies_path: str = None,
         master_action_space: Optional[spaces.Box] = None,
         weighting_scheme: str = "classic",
+        trainable_subpolicy: bool = False,
     ):
         self.n_subpolicies = master_action_space
         self.env_action_space = action_space
         self.n_actions = np.prod(master_action_space.shape)
         self.weighting_scheme = weighting_scheme
+        self.trainable_subpolicy = trainable_subpolicy
 
         # we modify the action space to match the number of subpolicies
         super().__init__(
@@ -79,10 +81,12 @@ class SACMasterPolicy(SACPolicy):
                                       action_space,
                                       lr_schedule)
                 print(f"loading from: {sub_policies_path+checkpoints[i]}...")
-                subpolicy.load_state_dict(th.load(sub_policies_path+checkpoints[i]))
+                subpolicy.load_state_dict(th.load(sub_policies_path+checkpoints[i], map_location=th.device('cpu')))
                 self.subpolicies.append(subpolicy)
-        for params in self.subpolicies.parameters():
-            params.requires_grad = False
+                
+        if not self.trainable_subpolicy:     
+            for params in self.subpolicies.parameters():
+                params.requires_grad = False
         
     def get_pool_out(self, observation: PyTorchObs, deterministic: bool =True):
         if isinstance(observation, tuple) and len(observation) == 2 and isinstance(observation[1], dict):
@@ -122,7 +126,7 @@ class SACMasterPolicy(SACPolicy):
 
         pool_output = self.get_pool_out(observation, deterministic=True)
         out = self.weighted_action(pool_output, weights)
-        return out, weights
+        return out, weights#, pool_output
         
     def predict(
         self,
@@ -161,10 +165,13 @@ class SACMasterPolicy(SACPolicy):
         obs_tensor, vectorized_env = self.obs_to_tensor(observation)
 
         with th.no_grad():
+            # actions, weights, sub_actions = self._predict(obs_tensor, deterministic=deterministic)
             actions, weights = self._predict(obs_tensor, deterministic=deterministic)
+
         # Convert to numpy, and reshape to the original action shape
         actions = actions.cpu().numpy().reshape((-1, *self.env_action_space.shape))  # type: ignore[misc]
         weights = weights.cpu().numpy().reshape((-1, self.n_actions))
+        # sub_actions = sub_actions.cpu().reshape((-1, self.n_subpolicies, self.action_space))
         if isinstance(self.action_space, spaces.Box):
             if self.squash_output:
                 # Rescale to proper domain when using squashing
@@ -181,7 +188,8 @@ class SACMasterPolicy(SACPolicy):
             actions = actions.squeeze(axis=0)
             weights = weights.squeeze(axis=0)
 
-        return actions, weights, state  # type: ignore[return-value]
+        # return actions, (weights, sub_actions), state  # type: ignore[return-value]
+        return actions, weights, state
     
     def scale_action(self, action: np.ndarray) -> np.ndarray:
         """
