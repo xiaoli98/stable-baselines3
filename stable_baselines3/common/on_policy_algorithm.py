@@ -104,6 +104,7 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
+        self.rollout_buffer: Optional[RolloutBuffer] = None
         self.rollout_buffer_class = rollout_buffer_class
         self.rollout_buffer_kwargs = rollout_buffer_kwargs or {}
 
@@ -120,16 +121,17 @@ class OnPolicyAlgorithm(BaseAlgorithm):
             else:
                 self.rollout_buffer_class = RolloutBuffer
 
-        self.rollout_buffer = self.rollout_buffer_class(
-            self.n_steps,
-            self.observation_space,  # type: ignore[arg-type]
-            self.action_space,
-            device=self.device,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            n_envs=self.n_envs,
-            **self.rollout_buffer_kwargs,
-        )
+        if self.rollout_buffer is None:
+            self.rollout_buffer = self.rollout_buffer_class(
+                self.n_steps,
+                self.observation_space,  # type: ignore[arg-type]
+                self.action_space,
+                device=self.device,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+                n_envs=self.n_envs,
+                **self.rollout_buffer_kwargs,
+            )
         self.policy = self.policy_class(  # type: ignore[assignment]
             self.observation_space, self.action_space, self.lr_schedule, use_sde=self.use_sde, **self.policy_kwargs
         )

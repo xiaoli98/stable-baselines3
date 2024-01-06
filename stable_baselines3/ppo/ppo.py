@@ -7,7 +7,7 @@ import torch as th
 from gymnasium import spaces
 from torch.nn import functional as F
 
-from stable_baselines3.common.buffers import RolloutBuffer
+from stable_baselines3.common.buffers import DictRolloutBuffer, RolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, BasePolicy, MultiInputActorCriticPolicy
@@ -395,6 +395,25 @@ class PPOMaster(PPO):
             device,
             _init_setup_model,
         )
+    def _setup_model(self) -> None:
+        if self.rollout_buffer_class is None:
+            if isinstance(self.observation_space, spaces.Dict):
+                self.rollout_buffer_class = DictRolloutBuffer
+            else:
+                self.rollout_buffer_class = RolloutBuffer
+
+        if self.rollout_buffer is None:
+            self.rollout_buffer = self.rollout_buffer_class(
+                self.n_steps,
+                self.observation_space,  # type: ignore[arg-type]
+                self.n_subpolicies,
+                device=self.device,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+                n_envs=self.n_envs,
+                **self.rollout_buffer_kwargs,
+            )
+        return super()._setup_model()
         
     def collect_rollouts(
         self,
@@ -440,6 +459,7 @@ class PPOMaster(PPO):
             # actions are weights (to be saved in the buffer)
             # weighted_actions should be executed in environment
             weighted_actions = weighted_actions.cpu().numpy()
+            actions = actions.cpu().numpy()
 
             # Rescale and perform action
             clipped_actions = weighted_actions

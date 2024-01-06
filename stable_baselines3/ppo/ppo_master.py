@@ -17,6 +17,7 @@ from stable_baselines3.common.torch_layers import (
     create_mlp,
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
+from stable_baselines3.sac.policies import SACPolicy
 
 class PPOMaster_Policy(ActorCriticPolicy):
     def __init__(
@@ -74,7 +75,7 @@ class PPOMaster_Policy(ActorCriticPolicy):
             checkpoints = os.listdir(sub_policies_path)
             n_subpolicies = np.prod(master_action_space.shape)
             for i in range(n_subpolicies):
-                subpolicy = ActorCriticPolicy(observation_space,
+                subpolicy = SACPolicy(observation_space,
                                       action_space,
                                       lr_schedule)
                 print(f"loading from: {sub_policies_path+checkpoints[i]}...")
@@ -109,7 +110,16 @@ class PPOMaster_Policy(ActorCriticPolicy):
         return  out
     
     def forward(self, obs: Tensor, deterministic: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
+        # weights shape [BS x NP]
         weights, values, log_prob = super().forward(obs, deterministic)
+        weights = weights.transpose(0,1)
+        # scale into [0,1] 
+        if self.weighting_scheme == "classic":
+            weights += 1
+            weights /= 2
+        elif self.weighting_scheme == "minmax":
+            weights -= weights.min()
+            weights /= weights.max() 
         pool_output = self.get_pool_out(obs, deterministic=True)
         weighted_action = self.weighted_action(pool_output, weights)
         
