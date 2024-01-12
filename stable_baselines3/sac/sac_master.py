@@ -20,6 +20,7 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.sac.policies import SACPolicy
+from stable_baselines3.sac.sub_policies import SubSACPolicy
 
 class SACMasterPolicy(SACPolicy):
     def __init__(
@@ -75,11 +76,20 @@ class SACMasterPolicy(SACPolicy):
             checkpoints = os.listdir(sub_policies_path)
             n_subpolicies = np.prod(master_action_space.shape)
             for i in range(n_subpolicies):
-                subpolicy = SACPolicy(observation_space,
+                obs_space = observation_space
+                truncate_obs = False
+                if "lane_centering" in checkpoints[i]:
+                    obs_space = spaces.Box(-np.inf, np.inf, (1, 9), np.float32)
+                    truncate_obs = True
+                subpolicy = SubSACPolicy(obs_space,
                                       action_space,
-                                      lr_schedule)
+                                      lr_schedule,
+                                      truncate_obs=truncate_obs,
+                                      sub_policy_name=checkpoints[i])
                 print(f"loading from: {sub_policies_path+checkpoints[i]}...")
-                subpolicy.load_state_dict(th.load(sub_policies_path+checkpoints[i]))
+                load_weights = th.load(sub_policies_path+checkpoints[i], map_location=th.device('cpu'))
+                # print(f"load_weights: {load_weights}")
+                subpolicy.load_state_dict(load_weights)
                 self.subpolicies.append(subpolicy)
         for params in self.subpolicies.parameters():
             params.requires_grad = False
