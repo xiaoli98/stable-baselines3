@@ -5,6 +5,7 @@ from gymnasium import spaces
 import numpy as np
 from torch import nn
 import torch as th
+from torch._tensor import Tensor
 import torch.nn.functional as F
 
 from stable_baselines3.common.policies import BasePolicy
@@ -22,7 +23,7 @@ from avalanche.benchmarks.scenarios import CLExperience
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.sac.policies import SACPolicy, LOG_STD_MAX, LOG_STD_MIN
-from stable_baselines3.sac.sub_policies import SubSACPolicy
+from stable_baselines3.sac.sub_policies import SubSACPolicy, SubActor
 
 
 class LinearAdapter(nn.Module):
@@ -97,6 +98,149 @@ class MLPAdapter(nn.Module):
         x = self.U(self.activation(self.V(x)))
         return x
 
+class PNN_Actor(SubActor):
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Box,
+        net_arch: List[int],
+        features_extractor: nn.Module,
+        features_dim: int,
+        num_prev_modules,
+        # prev_cols,
+        activation_fn: Type[nn.Module] = nn.ReLU,
+        use_sde: bool = False,
+        log_std_init: float = -3,
+        full_std: bool = True,
+        use_expln: bool = False,
+        clip_mean: float = 2.0,
+        normalize_images: bool = True,
+        truncate_obs: bool=False,
+        adapter="mlp",
+    ):
+        super().__init__(
+            observation_space,
+            action_space,
+            net_arch,
+            features_extractor,
+            features_dim,
+            activation_fn,
+            use_sde,
+            log_std_init,
+            full_std,
+            use_expln,
+            clip_mean,
+            normalize_images,
+            truncate_obs,
+        )
+        # self.in_features = self.net_arch[-1] if len(self.net_arch) > 0 else self.actor.features_dim
+        self.latent_pi_1_in_dim = self.net_arch[-1] # 256
+        self.latent_pi_1_out_dim = self.net_arch[-1] # 256
+        
+        self.latent_pi_2_in_dim = self.net_arch[-1] # 256
+        self.latent_pi_2_out_dim = self.net_arch[-1] # 256
+        
+        self.num_prev_modules = num_prev_modules
+        # self.prev_cols = prev_cols
+        
+        if adapter == "linear":
+            self.adapter_latent_pi_1 = LinearAdapter(
+                self.latent_pi_1_in_dim, self.latent_pi_1_out_dim, num_prev_modules
+            )
+            self.adapter_latent_pi_2 = LinearAdapter(
+                self.latent_pi_2_in_dim, self.latent_pi_2_out_dim, num_prev_modules
+            )
+        elif adapter == "mlp":
+            self.adapter_latent_pi_1 = MLPAdapter(
+                self.latent_pi_1_in_dim, self.latent_pi_1_out_dim, num_prev_modules
+            )
+            self.adapter_latent_pi_2 = MLPAdapter(
+                self.latent_pi_2_in_dim, self.latent_pi_2_out_dim, num_prev_modules
+            )
+        else:
+            raise ValueError("`adapter` must be one of: {'mlp', `linear'}.")
+        # print(f"\tadapter: {self.adapter if self.adapter is not None else None}")
+    
+    def _set_prev_cols(self, prev_cols):
+        self.prev_cols = nn.ModuleList(prev_cols)        
+        # print(f"prev cols: {self.prev_cols}")
+        # print(f"len: {len(self.prev_cols) if self.prev_cols is not None else None}")
+    
+    def _get_latent(self, obs:PyTorchObs):
+        # print(f"{self.sub_policy_name}: {self.truncate_obs}")
+        # print(f"obs shape: {obs.shape}")
+        if self.truncate_obs:
+            # truncate the observation to only the fist row
+            obs = th.narrow(obs, 1, 0, 1)
+        x = self.extract_features(obs, self.features_extractor)
+        # print(f"x shape: {x.shape}")
+        latents = []
+        # print(f"latent_pi len: {len(self.latent_pi)}")
+        x = self.latent_pi[:1](x)
+        latents.append(x)
+        
+        x = self.latent_pi[2:](x)
+        latents.append(x)
+        
+        # print(f"latents len: {len(latents)}, {latents[0].shape}")
+        out = th.stack(latents)
+        # print(f"out shape: {out.shape}")
+        return out
+    
+    def _get_mean_actions(self, obs: PyTorchObs):
+        latent_pi = self._get_latent(obs)
+        return self.mu(latent_pi)
+    
+    def get_action_dist_params(self, obs: PyTorchObs, previous) -> Tuple[th.Tensor, th.Tensor, Dict[str, th.Tensor]]:
+        """
+        Get the parameters for the action distribution.
+
+        :param obs:
+        :return:
+            Mean, standard deviation and optional keyword arguments.
+        """
+        # # features = self.extract_features(obs, self.features_extractor)
+        # # latent_pi = self.latent_pi(features)
+        # latent_pi = self._get_latent(obs)
+        # # print(f"latent_pi: {latent_pi}")
+        # adapter_out = self.adapter(previous)
+        # # print(f"adapter_out: {adapter_out}")
+        # mean_actions = self.mu(latent_pi) + adapter_out
+        # # print(f"mean_actions : {mean_actions}")
+        # # input()
+        features = self.extract_features(obs, self.features_extractor)
+        latent_pi_out_1 = self.latent_pi[0](features)
+        # print(f"adapter 1 input: {len([item[0] for item in previous])}")
+        # print(f"shape: {[item for item in previous][0].shape}")
+        adapter_latent_pi_out_1 = self.adapter_latent_pi_1([item[0] for item in previous])
+        
+        latent_pi_out_2 = self.latent_pi[1](latent_pi_out_1 + adapter_latent_pi_out_1) 
+        adapter_latent_pi_out_2 = self.adapter_latent_pi_2([item[1] for item in previous])
+        
+        latent_pi = latent_pi_out_2 + adapter_latent_pi_out_2
+        mean_actions = self.mu(latent_pi)
+        
+        if self.use_sde:
+            return mean_actions, self.log_std, dict(latent_sde=latent_pi)
+        # Unstructured exploration (Original implementation)
+        log_std = self.log_std(latent_pi)  # type: ignore[operator]
+        # Original Implementation to cap the standard deviation
+        log_std = th.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+        return mean_actions, log_std, {}
+    
+    def forward(self, obs: PyTorchObs, previous_latent, deterministic: bool = False) -> th.Tensor:
+        mean_actions, log_std, kwargs = self.get_action_dist_params(obs, previous_latent)
+        return self.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
+
+    def action_log_prob(self, obs: PyTorchObs) -> Tuple[th.Tensor, th.Tensor]:
+        if self.prev_cols is not None:
+            previous = [ col.actor._get_latent(obs) for col in self.prev_cols[:self.num_prev_modules]]
+            # print(f"previous len: {len(previous)}, [0] shape: {previous[0].shape}")
+            mean_actions, log_std, kwargs = self.get_action_dist_params(obs, previous)
+        else:
+            mean_actions, log_std, kwargs = self.get_action_dist_params(obs)
+        return self.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
+
 
 class PNNColumn(SubSACPolicy):
     """
@@ -109,6 +253,7 @@ class PNNColumn(SubSACPolicy):
         action_space: spaces.Box,
         lr_schedule: Schedule,
         num_prev_modules,
+        prev_cols,
         net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
         use_sde: bool = False,
@@ -126,7 +271,9 @@ class PNNColumn(SubSACPolicy):
         sub_policy_name: str = None,
         adapter="mlp",
     ):
-
+        self.num_prev_modules = num_prev_modules
+        self.sub_policy_name = sub_policy_name
+        self.adapter = adapter
         super().__init__(
                 observation_space,
                 action_space,
@@ -147,75 +294,27 @@ class PNNColumn(SubSACPolicy):
                 truncate_obs,
                 sub_policy_name,
         )
-        self.in_features = self.net_arch[-1] if len(self.net_arch) > 0 else self.actor.features_dim
-        self.out_features_per_column = get_action_dim(self.action_space)
-        self.num_prev_modules = num_prev_modules
+        self.prev_cols = prev_cols
+        if prev_cols is not None:
+            self.actor._set_prev_cols(prev_cols) 
         
-        # print(f"\tstats: \n\tin_features: {self.in_features}")
-        # print(f"\tout_features: {self.out_features_per_column}")
-        # print(f"\tnum  prev modules: {self.num_prev_modules}")
-        # print(f"\tfeature extractor: {self.actor.features_extractor}")
-        # print(f"\ttruncate obs : {truncate_obs}")
-        # self.itoh = policy(policy_kwargs)
-        if adapter == "linear":
-            self.adapter = LinearAdapter(
-                self.in_features, self.out_features_per_column, num_prev_modules
-            )
-        elif adapter == "mlp":
-            self.adapter = MLPAdapter(
-                self.in_features, self.out_features_per_column, num_prev_modules
-            )
-        else:
-            raise ValueError("`adapter` must be one of: {'mlp', `linear'}.")
-        # print(f"\tadapter: {self.adapter if self.adapter is not None else None}")
-        
-    def freeze(self):
-        for param in self.parameters():
-            param.requires_grad = False
-            
-    def _get_latent(self, obs:PyTorchObs):
-        # print(f"{self.sub_policy_name}: {self.truncate_obs}")
-        # print(f"obs shape: {obs.shape}")
-        if self.truncate_obs:
-            # truncate the observation to only the fist row
-            obs = th.narrow(obs, 1, 0, 1)
-        features = self.extract_features(obs, self.actor.features_extractor)
-        return self.actor.latent_pi(features)
-        
-    def get_action_dist_params(self, obs: PyTorchObs, previous_latent) -> Tuple[th.Tensor, th.Tensor, Dict[str, th.Tensor]]:
-        """
-        Get the parameters for the action distribution.
-
-        :param obs:
-        :return:
-            Mean, standard deviation and optional keyword arguments.
-        """
-        # features = self.extract_features(obs, self.actor.features_extractor)
-        # latent_pi = self.actor.latent_pi(features)
-        latent_pi = self._get_latent(obs)
-        adapter_out = self.adapter(previous_latent)
-        mean_actions = self.actor.mu(latent_pi) + adapter_out
-
-        if self.actor.use_sde:
-            return mean_actions, self.actor.log_std, dict(latent_sde=latent_pi)
-        # Unstructured exploration (Original implementation)
-        log_std = self.actor.log_std(latent_pi)  # type: ignore[operator]
-        # Original Implementation to cap the standard deviation
-        log_std = th.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-        return mean_actions, log_std, {}
+    def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> SubActor:
+        actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        actor_kwargs.update({
+                # "prev_cols": self.prev_cols,
+                "truncate_obs": self.truncate_obs,
+                "num_prev_modules": self.num_prev_modules,
+                "adapter": self.adapter,
+            })
+        return PNN_Actor(**actor_kwargs).to(self.device)
     
-    def forward(self, obs: PyTorchObs, previous_latent, deterministic: bool = False) -> th.Tensor:
-        mean_actions, log_std, kwargs = self.get_action_dist_params(obs, previous_latent)
-        return self.actor.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
-
-    def action_log_prob(self, obs: PyTorchObs, previous_latent) -> Tuple[th.Tensor, th.Tensor]:
-        mean_actions, log_std, kwargs = self.get_action_dist_params(obs, previous_latent)
-        return self.actor.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
+    def forward(self, obs: PyTorchObs, previous, deterministic: bool = False) -> Tensor:
+        return self.actor(obs, previous, deterministic)
 
 
 class PNN_Policy(BasePolicy):
     """
-    SAC Policy with adaptation from previous SAC policym like the PNN.
+    SAC Policy with adaptation from previous SAC policy like the PNN.
     adaptation only for latent
     """
     def __init__(
@@ -254,7 +353,7 @@ class PNN_Policy(BasePolicy):
         assert len(checkpoints) >= 1
         self.num_columns = len(checkpoints) + 1
 
-        self.columns = nn.ModuleList()
+        self.columns = []
         for i in range(self.num_columns - 1):
             print(f"loading sub policy: {checkpoints[i]}...")
             obs_space = observation_space
@@ -267,6 +366,7 @@ class PNN_Policy(BasePolicy):
                 action_space,
                 lr_schedule,
                 0, #num_prev_modules
+                None, # prev_cols
                 net_arch,
                 activation_fn,
                 use_sde,
@@ -297,6 +397,7 @@ class PNN_Policy(BasePolicy):
                 action_space,
                 lr_schedule,
                 self.num_columns - 1, #num_prev_modules
+                self.columns, 
                 net_arch,
                 activation_fn,
                 use_sde,
@@ -310,7 +411,7 @@ class PNN_Policy(BasePolicy):
                 optimizer_kwargs,
                 n_critics,
                 share_features_extractor,
-                False,# truncate_obs,
+                False,# truncate_obs,W
                 "racetrack",#sub_policy_name,
                 adapter=adapter,
             )
@@ -338,9 +439,12 @@ class PNN_Policy(BasePolicy):
         
     def _predict(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         # obs = obs.flatten(1)
-        previous_latent = [ col._get_latent(obs) for col in self.columns[:-1]]
+        previous = [ col.actor._get_latent(obs) for col in self.columns[:-1]]
+        # previous = [col._get_mean_actions(obs) for col in self.columns[:-1]]
+        # print(f"previous: {len(previous)}")
+        # print(f"shape: {previous[0].shape}")
         # for idx, prev_latent in enumerate(previous_latent):
         #     print(f"{self.columns[idx].sub_policy_name}: {prev_latent}\nshape:{prev_latent.shape}")
-        return self.columns[-1](obs, previous_latent, deterministic)
-    
+        return self.columns[-1](obs, previous, deterministic)
+
 __all__ = ["PNN", "PNNLayer", "PNNColumn", "MLPAdapter", "LinearAdapter"]
