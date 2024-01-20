@@ -15,10 +15,6 @@ from stable_baselines3.common.torch_layers import (
     FlattenExtractor,
     NatureCNN,
 )
-from avalanche.benchmarks.utils.flat_data import ConstantSequence
-from avalanche.models import MultiTaskModule
-from avalanche.models import MultiHeadClassifier
-from avalanche.benchmarks.scenarios import CLExperience
 
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 from stable_baselines3.common.preprocessing import get_action_dim
@@ -159,32 +155,23 @@ class PNN_Actor(SubActor):
             )
         else:
             raise ValueError("`adapter` must be one of: {'mlp', `linear'}.")
-        # print(f"\tadapter: {self.adapter if self.adapter is not None else None}")
     
     def _set_prev_cols(self, prev_cols):
         self.prev_cols = nn.ModuleList(prev_cols)        
-        # print(f"prev cols: {self.prev_cols}")
-        # print(f"len: {len(self.prev_cols) if self.prev_cols is not None else None}")
     
     def _get_latent(self, obs:PyTorchObs):
-        # print(f"{self.sub_policy_name}: {self.truncate_obs}")
-        # print(f"obs shape: {obs.shape}")
         if self.truncate_obs:
             # truncate the observation to only the fist row
             obs = th.narrow(obs, 1, 0, 1)
         x = self.extract_features(obs, self.features_extractor)
-        # print(f"x shape: {x.shape}")
         latents = []
-        # print(f"latent_pi len: {len(self.latent_pi)}")
         x = self.latent_pi[:1](x)
         latents.append(x)
         
         x = self.latent_pi[2:](x)
         latents.append(x)
         
-        # print(f"latents len: {len(latents)}, {latents[0].shape}")
         out = th.stack(latents)
-        # print(f"out shape: {out.shape}")
         return out
     
     def _get_mean_actions(self, obs: PyTorchObs):
@@ -210,8 +197,6 @@ class PNN_Actor(SubActor):
         # # input()
         features = self.extract_features(obs, self.features_extractor)
         latent_pi_out_1 = self.latent_pi[0](features)
-        # print(f"adapter 1 input: {len([item[0] for item in previous])}")
-        # print(f"shape: {[item for item in previous][0].shape}")
         adapter_latent_pi_out_1 = self.adapter_latent_pi_1([item[0] for item in previous])
         
         latent_pi_out_2 = self.latent_pi[1](latent_pi_out_1 + adapter_latent_pi_out_1) 
@@ -301,7 +286,6 @@ class PNNColumn(SubSACPolicy):
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> SubActor:
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         actor_kwargs.update({
-                # "prev_cols": self.prev_cols,
                 "truncate_obs": self.truncate_obs,
                 "num_prev_modules": self.num_prev_modules,
                 "adapter": self.adapter,
@@ -417,7 +401,6 @@ class PNN_Policy(BasePolicy):
             )
         self.columns.append(last_col)
         self._create_alias()
-        # self.classifier = MultiHeadClassifier(hidden_features_per_column)
 
     def _create_alias(self):
         # refer actor and critic only for the last column
@@ -438,11 +421,8 @@ class PNN_Policy(BasePolicy):
         self.training = mode
         
     def _predict(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
-        # obs = obs.flatten(1)
         previous = [ col.actor._get_latent(obs) for col in self.columns[:-1]]
         # previous = [col._get_mean_actions(obs) for col in self.columns[:-1]]
-        # print(f"previous: {len(previous)}")
-        # print(f"shape: {previous[0].shape}")
         # for idx, prev_latent in enumerate(previous_latent):
         #     print(f"{self.columns[idx].sub_policy_name}: {prev_latent}\nshape:{prev_latent.shape}")
         return self.columns[-1](obs, previous, deterministic)
