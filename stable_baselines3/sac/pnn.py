@@ -113,6 +113,7 @@ class PNN_Actor(SubActor):
         normalize_images: bool = True,
         truncate_obs: bool=False,
         adapter="mlp",
+        adapt_act=False,
     ):
         super().__init__(
             observation_space,
@@ -137,22 +138,29 @@ class PNN_Actor(SubActor):
         self.latent_pi_2_out_dim = self.net_arch[-1] # 256
         
         self.num_prev_modules = num_prev_modules
+        self.adapt_act = adapt_act
         # self.prev_cols = prev_cols
         
         if adapter == "linear":
-            self.adapter_latent_pi_1 = LinearAdapter(
-                self.latent_pi_1_in_dim, self.latent_pi_1_out_dim, num_prev_modules
-            )
-            self.adapter_latent_pi_2 = LinearAdapter(
-                self.latent_pi_2_in_dim, self.latent_pi_2_out_dim, num_prev_modules
-            )
+            if self.adapt_act:
+                self.adapter_mean_act = LinearAdapter(2, 2, num_prev_modules)
+            else:
+                self.adapter_latent_pi_1 = LinearAdapter(
+                    self.latent_pi_1_in_dim, self.latent_pi_1_out_dim, num_prev_modules
+                )
+                self.adapter_latent_pi_2 = LinearAdapter(
+                    self.latent_pi_2_in_dim, self.latent_pi_2_out_dim, num_prev_modules
+                )
         elif adapter == "mlp":
-            self.adapter_latent_pi_1 = MLPAdapter(
-                self.latent_pi_1_in_dim, self.latent_pi_1_out_dim, num_prev_modules
-            )
-            self.adapter_latent_pi_2 = MLPAdapter(
-                self.latent_pi_2_in_dim, self.latent_pi_2_out_dim, num_prev_modules
-            )
+            if self.adapt_act:
+                self.adapter_mean_act = LinearAdapter(2, 2, num_prev_modules)
+            else:
+                self.adapter_latent_pi_1 = MLPAdapter(
+                    self.latent_pi_1_in_dim, self.latent_pi_1_out_dim, num_prev_modules
+                )
+                self.adapter_latent_pi_2 = MLPAdapter(
+                    self.latent_pi_2_in_dim, self.latent_pi_2_out_dim, num_prev_modules
+                )
         else:
             raise ValueError("`adapter` must be one of: {'mlp', `linear'}.")
     
@@ -164,6 +172,7 @@ class PNN_Actor(SubActor):
             # truncate the observation to only the fist row
             obs = th.narrow(obs, 1, 0, 1)
         x = self.extract_features(obs, self.features_extractor)
+
         latents = []
         x = self.latent_pi[:1](x)
         latents.append(x)
@@ -196,14 +205,18 @@ class PNN_Actor(SubActor):
         # # print(f"mean_actions : {mean_actions}")
         # # input()
         features = self.extract_features(obs, self.features_extractor)
-        latent_pi_out_1 = self.latent_pi[0](features)
-        adapter_latent_pi_out_1 = self.adapter_latent_pi_1([item[0] for item in previous])
-        
-        latent_pi_out_2 = self.latent_pi[1](latent_pi_out_1 + adapter_latent_pi_out_1) 
-        adapter_latent_pi_out_2 = self.adapter_latent_pi_2([item[1] for item in previous])
-        
-        latent_pi = latent_pi_out_2 + adapter_latent_pi_out_2
-        mean_actions = self.mu(latent_pi)
+        if self.adapt_act:
+            latent_pi = self.latent_pi(features)
+            mean_actions = self.mu
+        else:
+            latent_pi_out_1 = self.latent_pi[0](features)
+            adapter_latent_pi_out_1 = self.adapter_latent_pi_1([item[0] for item in previous])
+            
+            latent_pi_out_2 = self.latent_pi[1](latent_pi_out_1 + adapter_latent_pi_out_1) 
+            adapter_latent_pi_out_2 = self.adapter_latent_pi_2([item[1] for item in previous])
+            
+            latent_pi = latent_pi_out_2 + adapter_latent_pi_out_2
+            mean_actions = self.mu(latent_pi)
         
         if self.use_sde:
             return mean_actions, self.log_std, dict(latent_sde=latent_pi)
@@ -319,7 +332,7 @@ class PNN_Policy(BasePolicy):
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
-        sub_policies_path: str = "/home/boy/stable-baselines3/checkpoint/subpolicies_5vehicles_MIRINL/",
+        sub_policies_path: str = "/home/mli/Master_Thesis/stable_baselines_algo/checkpoint/subpolicies_5vehicles_MIRIN/",
         adapter="mlp",
     ):
 
@@ -334,6 +347,7 @@ class PNN_Policy(BasePolicy):
             normalize_images=normalize_images,
         )
         checkpoints = os.listdir(sub_policies_path)
+        checkpoints = sorted(checkpoints)
         assert len(checkpoints) >= 1
         self.num_columns = len(checkpoints) + 1
 
@@ -368,7 +382,7 @@ class PNN_Policy(BasePolicy):
                 checkpoints[i], #subpolicy name
                 adapter=adapter,
             )
-            load_weights = th.load(sub_policies_path+checkpoints[i], map_location=th.device('cpu'))
+            load_weights = th.load(sub_policies_path+checkpoints[i])
             col.load_state_dict(load_weights)
             for params in col.parameters():
                 params.requires_grad = False

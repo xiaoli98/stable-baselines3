@@ -84,13 +84,14 @@ class SACMasterPolicy(SACPolicy):
                 if "lane_centering" in checkpoints[i]:
                     obs_space = spaces.Box(-np.inf, np.inf, (1, 9), np.float32)
                     truncate_obs = True
+                # print(f"obs space: {obs_space}")
                 subpolicy = SubSACPolicy(obs_space,
                                       action_space,
                                       lr_schedule,
                                       truncate_obs=truncate_obs,
                                       sub_policy_name=checkpoints[i])
                 print(f"loading from: {sub_policies_path+checkpoints[i]}...")
-                load_weights = th.load(sub_policies_path+checkpoints[i], map_location=th.device('cpu'))
+                load_weights = th.load(sub_policies_path+checkpoints[i])
                 # print(f"load_weights: {load_weights}")
                 subpolicy.load_state_dict(load_weights)
                 self.subpolicies.append(subpolicy)

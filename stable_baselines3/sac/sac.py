@@ -368,11 +368,17 @@ class SACMaster(SAC):
     ):
         if load_subpolicies:
             self.n_subpolicies = spaces.Box(0,1, [len(os.listdir(sub_policies_path))])
-            policy_kwargs = {}
-            policy_kwargs["load_subpolicies"] = load_subpolicies
-            policy_kwargs["sub_policies_path"] = sub_policies_path
-            policy_kwargs["master_action_space"] = self.n_subpolicies
-            policy_kwargs["weighting_scheme"] = weighting_scheme
+            policy_kwargs = {} if policy_kwargs is None else policy_kwargs
+            policy_kwargs.update({
+                        "load_subpolicies": load_subpolicies,
+                        "sub_policies_path": sub_policies_path,
+                        "master_action_space": self.n_subpolicies,
+                        "weighting_scheme": weighting_scheme,
+            })
+            # policy_kwargs[] = load_subpolicies
+            # policy_kwargs[] = sub_policies_path
+            # policy_kwargs[] = self.n_subpolicies
+            # policy_kwargs["weighting_scheme"] = weighting_scheme
         
         super().__init__(
             policy,
