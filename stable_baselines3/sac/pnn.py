@@ -332,7 +332,7 @@ class PNN_Policy(BasePolicy):
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
-        sub_policies_path: str = "/home/mli/Master_Thesis/stable_baselines_algo/checkpoint/subpolicies_5vehicles_MIRIN/",
+        sub_policies_path: str = "./src/checkpoint/subpolicies_5vehicles_MIRIN/",
         adapter="mlp",
     ):
 
